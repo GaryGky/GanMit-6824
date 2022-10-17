@@ -27,7 +27,7 @@ const (
 
 type Task struct {
 	ID         int      // taskID auto-increment
-	FileName   []string // input file for the worker to read
+	FileNames  []string // input file for the worker to read
 	Progress   Progress // current task progress
 	Phase      Phase    // notes the task is whether map or reduce
 	CreateTime time.Time
@@ -37,9 +37,9 @@ type Coordinator struct {
 	WorkerCnt       int // worker count
 	NReducer        int
 	TaskPipe        chan *Task
-	Phase           Phase       // Track MapReduce Phase
-	ProcessingTasks map[int]int // Track Processing Tasks
-	Files           []string    // all the input files
+	Phase           Phase         // Track MapReduce Phase
+	ProcessingTasks map[int]*Task // Track Processing Tasks
+	Files           []string      // all the input files
 }
 
 func (c *Coordinator) HandleGetTask(_ *GetTaskArgs, reply *GetTaskReply) error {
@@ -87,13 +87,13 @@ func (c *Coordinator) generateMapTasks(files []string) {
 	id := 1
 	for _, file := range files {
 		task := &Task{
-			ID:       id,
-			FileName: []string{file},
-			Progress: Initiate,
-			Phase:    PhaseMap,
+			ID:        id,
+			FileNames: []string{file},
+			Progress:  Initiate,
+			Phase:     PhaseMap,
 		}
 		c.TaskPipe <- task
-		c.ProcessingTasks[task.ID] = 1
+		c.ProcessingTasks[task.ID] = task
 		id++
 	}
 }
@@ -112,12 +112,13 @@ func (c *Coordinator) generateReduceTasks() {
 	for reducerID, files := range rID2Files {
 		task := &Task{
 			ID:         reducerID,
-			FileName:   files,
+			FileNames:  files,
 			Progress:   Initiate,
 			Phase:      PhaseReduce,
 			CreateTime: time.Now(),
 		}
 		c.TaskPipe <- task
+		c.ProcessingTasks[task.ID] = task
 	}
 }
 

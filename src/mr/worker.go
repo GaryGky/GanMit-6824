@@ -1,6 +1,7 @@
 package mr
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -42,7 +43,7 @@ type WorkerImpl struct {
 // Worker
 // main/worker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	const errCtx = "mr.Worker"
+	const errCtx = "mr.Worker.Initiate"
 	r, err := taskQuery()
 	if err != nil {
 		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
@@ -58,14 +59,16 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 	impl.mainProcessor()
 }
 func (w *WorkerImpl) mainProcessor() {
-	const errCtx = "WorkerImpl mainProcessor"
+	const errCtx = "mr.Worker.mainProcessor"
 	for task := range w.TaskPipe {
 		task.CreateTime = time.Now()
+		task.Progress = Processing
 		switch task.Phase {
 		case PhaseMap:
 			if err := w.processMap(task); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
+			task.Progress = Finish
 			if err := taskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
@@ -74,6 +77,7 @@ func (w *WorkerImpl) mainProcessor() {
 			if err := w.processReduce(task); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
+			task.Progress = Finish
 			if err := taskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
@@ -83,9 +87,9 @@ func (w *WorkerImpl) mainProcessor() {
 }
 
 func (w *WorkerImpl) processMap(task *Task) error {
-	const errCtx = "mr.processMap"
+	const errCtx = "mr.Worker.processMap"
 	intermediate := make([]KeyValue, 0)
-	filename := task.FileName[0]
+	filename := task.FileNames[0]
 	file, err := os.Open(filename)
 	if err != nil {
 		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
@@ -99,15 +103,41 @@ func (w *WorkerImpl) processMap(task *Task) error {
 	intermediate = append(intermediate, kva...)
 
 	sort.Sort(ByKey(intermediate))
-	rID2Filename := generateReduceFile(w.NReducer, task.ID)
+	rID2FileEncoder := filenamesToFileEncoders(generateFilenames(w.NReducer, task.ID))
 	for i := 0; i < len(intermediate); {
 		hashKey := ihash(intermediate[i].Key) % w.NReducer
-		fmt.Fprintf(rID2Filename[hashKey], "%v %v\n", intermediate[i].Key, intermediate[i].Value)
+		rID2FileEncoder[hashKey].Encode(intermediate[i])
 	}
 	return nil
 }
 
 func (w *WorkerImpl) processReduce(task *Task) error {
+	const errCtx = "mr.Worker.processMap"
+	intermediate := make([]KeyValue, 0)
+	decoders := filenamesToFileDecoders(task.FileNames)
+	for _, dec := range decoders {
+		var kv KeyValue
+		dec.Decode(&kv)
+		intermediate = append(intermediate, kv)
+	}
+	sort.Sort(ByKey(intermediate))
+
+	oName := fmt.Sprintf("mr-out-%d", task.ID)
+	oFile, _ := os.Create(oName)
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := make([]string, 0)
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := w.ReduceFunc(intermediate[i].Key, values)
+		fmt.Fprintf(oFile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
 	return nil
 }
 
@@ -130,13 +160,32 @@ func taskNotify(args NotifyTaskArgs) error {
 	return nil
 }
 
-// return mapping: reducerID -> intermediate file
-func generateReduceFile(nReducer int, taskID int) map[int]*os.File {
-	rID2Filename := make(map[int]*os.File)
+// generate filenames based on nReducer and taskID
+func generateFilenames(nReducer int, taskID int) []string {
+	fileNames := make([]string, 0)
 	for i := 0; i < nReducer; i++ {
-		rID2Filename[i], _ = os.Create(fmt.Sprintf("mr-%d-%d", taskID, i))
+		fileNames = append(fileNames, fmt.Sprintf("mr-%d-%d", taskID, i))
 	}
-	return rID2Filename
+	return fileNames
+}
+
+// generate reduceID -> file encoders
+func filenamesToFileEncoders(filenames []string) map[int]*json.Encoder {
+	rID2FileEncoder := make(map[int]*json.Encoder)
+	for i, filename := range filenames {
+		oFile, _ := os.Create(filename)
+		rID2FileEncoder[i] = json.NewEncoder(oFile)
+	}
+	return rID2FileEncoder
+}
+
+func filenamesToFileDecoders(filenames []string) []*json.Decoder {
+	rID2FileEncoder := make([]*json.Decoder, len(filenames))
+	for i, filename := range filenames {
+		oFile, _ := os.Create(filename)
+		rID2FileEncoder[i] = json.NewDecoder(oFile)
+	}
+	return rID2FileEncoder
 }
 
 // send an RPC request to the coordinator, wait for the response, usually returns true. Returns false if something goes wrong.
