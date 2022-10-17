@@ -1,70 +1,136 @@
 package mr
 
-import "log"
+import (
+	"fmt"
+	"log"
+	"time"
+)
 import "net"
 import "os"
 import "net/rpc"
 import "net/http"
 
+type Progress int
+type Phase int
 
-type Coordinator struct {
-	// Your definitions here.
+const (
+	Initiate   Progress = 1
+	Processing Progress = 2
+	Finish     Progress = 3
+)
 
+const (
+	PhaseMap    Phase = 1
+	PhaseReduce Phase = 2
+	PhaseDone   Phase = 3
+)
+
+type Task struct {
+	ID         int      // taskID auto-increment
+	FileName   []string // input file for the worker to read
+	Progress   Progress // current task progress
+	Phase      Phase    // notes the task is whether map or reduce
+	CreateTime time.Time
 }
 
-// Your code here -- RPC handlers for the worker to call.
+type Coordinator struct {
+	WorkerCnt       int // worker count
+	NReducer        int
+	TaskPipe        chan *Task
+	Phase           Phase       // Track MapReduce Phase
+	ProcessingTasks map[int]int // Track Processing Tasks
+	Files           []string    // all the input files
+}
 
-//
-// an example RPC handler.
-//
-// the RPC argument and reply types are defined in rpc.go.
-//
-func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
-	reply.Y = args.X + 1
+func (c *Coordinator) HandleGetTask(_ *GetTaskArgs, reply *GetTaskReply) error {
+	reply.TaskPipe = c.TaskPipe
+	reply.WorkerID = c.WorkerCnt
+	c.WorkerCnt++
 	return nil
 }
 
+func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply) error {
+	delete(c.ProcessingTasks, args.TaskID)
+	if len(c.ProcessingTasks) == 0 {
+		switch c.Phase {
+		case PhaseMap:
+			c.generateReduceTasks()
+			c.Phase = PhaseReduce
+		case PhaseReduce:
+			c.Phase = PhaseDone
+			close(c.TaskPipe)
+		}
+	}
+	return nil
+}
 
-//
+// Done main/mrcoordinator.go calls Done() periodically to find out if the entire job has finished.
+func (c *Coordinator) Done() bool {
+	return c.Phase == PhaseDone
+}
+
+// MakeCoordinator create a Coordinator. main/mrcoordinator.go calls this function.
+func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	c := Coordinator{}
+
+	c.NReducer = nReduce
+	c.TaskPipe = make(chan *Task)
+	c.WorkerCnt = 0
+	c.Phase = PhaseMap
+	c.generateMapTasks(files)
+
+	c.server()
+	return &c
+}
+
+func (c *Coordinator) generateMapTasks(files []string) {
+	id := 1
+	for _, file := range files {
+		task := &Task{
+			ID:       id,
+			FileName: []string{file},
+			Progress: Initiate,
+			Phase:    PhaseMap,
+		}
+		c.TaskPipe <- task
+		c.ProcessingTasks[task.ID] = 1
+		id++
+	}
+}
+
+func (c *Coordinator) generateReduceTasks() {
+	rID2Files := make(map[int][]string)
+	for i := 0; i < c.NReducer; i++ {
+		for j := 0; j < len(c.Files); j++ {
+			if j == 0 {
+				rID2Files[i] = make([]string, 0)
+			}
+			rID2Files[i] = append(rID2Files[i], fmt.Sprintf("mr-%d-%d", j, i))
+		}
+	}
+
+	for reducerID, files := range rID2Files {
+		task := &Task{
+			ID:         reducerID,
+			FileName:   files,
+			Progress:   Initiate,
+			Phase:      PhaseReduce,
+			CreateTime: time.Now(),
+		}
+		c.TaskPipe <- task
+	}
+}
+
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
-	os.Remove(sockname)
+	os.RemoveAll(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
 	go http.Serve(l, nil)
-}
-
-//
-// main/mrcoordinator.go calls Done() periodically to find out
-// if the entire job has finished.
-//
-func (c *Coordinator) Done() bool {
-	ret := false
-
-	// Your code here.
-
-
-	return ret
-}
-
-//
-// create a Coordinator.
-// main/mrcoordinator.go calls this function.
-// nReduce is the number of reduce tasks to use.
-//
-func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
-
-	// Your code here.
-
-
-	c.server()
-	return &c
 }
