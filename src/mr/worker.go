@@ -34,6 +34,7 @@ func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 type WorkerImpl struct {
+	WorkerID   int32
 	NReducer   int
 	TaskPipe   chan *Task
 	MapFunc    func(string, string) []KeyValue
@@ -44,23 +45,25 @@ type WorkerImpl struct {
 // main/worker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
 	const errCtx = "mr.Worker.Initiate"
-	r, err := taskQuery()
+	r, err := rpcTaskQuery()
 	if err != nil {
 		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 		panic(err)
 	}
-
+	debug.Debug(debug.DInfo, "Worker-%v: created \n", r.WorkerID)
 	impl := &WorkerImpl{
 		NReducer:   r.NReducer,
 		TaskPipe:   r.TaskPipe,
 		MapFunc:    mapf,
 		ReduceFunc: reducef,
+		WorkerID:   r.WorkerID,
 	}
 	impl.mainProcessor()
 }
 func (w *WorkerImpl) mainProcessor() {
 	const errCtx = "mr.Worker.mainProcessor"
 	for task := range w.TaskPipe {
+		debug.Debug(debug.DInfo, "worker-%d receive task: %d", w.WorkerID, task.ID)
 		task.CreateTime = time.Now()
 		task.Progress = Processing
 		switch task.Phase {
@@ -69,7 +72,7 @@ func (w *WorkerImpl) mainProcessor() {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
 			task.Progress = Finish
-			if err := taskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
+			if err := rpcTaskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
 			debug.Debug(debug.DInfo, "Task-%d, Phase:%v has been done \n", task.ID, task.Phase)
@@ -78,7 +81,7 @@ func (w *WorkerImpl) mainProcessor() {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
 			task.Progress = Finish
-			if err := taskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
+			if err := rpcTaskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
 			debug.Debug(debug.DInfo, "Task-%d, Phase:%v has been done \n", task.ID, task.Phase)
@@ -98,7 +101,7 @@ func (w *WorkerImpl) processMap(task *Task) error {
 	if err != nil {
 		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 	}
-	file.Close()
+	defer file.Close()
 	kva := w.MapFunc(filename, string(content))
 	intermediate = append(intermediate, kva...)
 
@@ -142,7 +145,7 @@ func (w *WorkerImpl) processReduce(task *Task) error {
 }
 
 // RPC Call on Worker Init: Get task channel from coordinator
-func taskQuery() (GetTaskReply, error) {
+func rpcTaskQuery() (GetTaskReply, error) {
 	args := GetTaskArgs{}
 	reply := GetTaskReply{}
 	ok := call("Coordinator.HandleGetTask", &args, &reply)
@@ -153,7 +156,7 @@ func taskQuery() (GetTaskReply, error) {
 	}
 }
 
-func taskNotify(args NotifyTaskArgs) error {
+func rpcTaskNotify(args NotifyTaskArgs) error {
 	if ok := call("Coordinator.HandleNotifyTask", &args, &NotifyTaskReply{}); !ok {
 		return _errRPCFailed
 	}
@@ -190,7 +193,7 @@ func filenamesToFileDecoders(filenames []string) []*json.Decoder {
 
 // send an RPC request to the coordinator, wait for the response, usually returns true. Returns false if something goes wrong.
 func call(rpcname string, args interface{}, reply interface{}) bool {
-	// c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
+	//c, err := rpc.DialHTTP("tcp", "127.0.0.1"+":1234")
 	sockname := coordinatorSock()
 	c, err := rpc.DialHTTP("unix", sockname)
 	if err != nil {

@@ -3,6 +3,7 @@ package debug
 import (
 	"fmt"
 	"log"
+	"os"
 	"time"
 )
 
@@ -35,15 +36,16 @@ const (
 func init() {
 	debugStart = time.Now()
 
+	log.SetOutput(os.Stdout)
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
 	if debug >= 1 {
-		time := time.Since(debugStart).Microseconds()
-		time /= 100
-		prefix := fmt.Sprintf("%06d %v ", time, string(topic))
+		t := time.Since(debugStart).Microseconds()
+		t /= 100
+		prefix := fmt.Sprintf("%06d %v ", t, string(topic))
 		format = prefix + format
-		log.Printf(format, a...)
+		fmt.Printf(format, a...)
 	}
 }

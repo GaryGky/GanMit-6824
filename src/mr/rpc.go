@@ -9,7 +9,7 @@ type GetTaskArgs struct{}
 
 type GetTaskReply struct {
 	NReducer int
-	WorkerID int
+	WorkerID int32
 	TaskPipe chan *Task
 }
 

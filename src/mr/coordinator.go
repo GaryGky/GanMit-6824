@@ -3,10 +3,13 @@ package mr
 import (
 	"fmt"
 	"log"
+	"os"
+	"sync"
 	"time"
+
+	"6.824/debug"
 )
 import "net"
-import "os"
 import "net/rpc"
 import "net/http"
 
@@ -34,22 +37,29 @@ type Task struct {
 }
 
 type Coordinator struct {
-	WorkerCnt       int // worker count
+	WorkerCnt       int32 // worker count
 	NReducer        int
 	TaskPipe        chan *Task
 	Phase           Phase         // Track MapReduce Phase
 	ProcessingTasks map[int]*Task // Track Processing Tasks
 	Files           []string      // all the input files
+	Lock            sync.Mutex
 }
 
 func (c *Coordinator) HandleGetTask(_ *GetTaskArgs, reply *GetTaskReply) error {
+	c.Lock.Lock()
+	defer c.Lock.Unlock()
 	reply.TaskPipe = c.TaskPipe
 	reply.WorkerID = c.WorkerCnt
 	c.WorkerCnt++
+
+	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: %v \n", reply)
 	return nil
 }
 
 func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply) error {
+	debug.Debug(debug.DInfo, "coordinator.HandleNotifyTask: %v\n", args)
+
 	delete(c.ProcessingTasks, args.TaskID)
 	if len(c.ProcessingTasks) == 0 {
 		switch c.Phase {
@@ -72,15 +82,19 @@ func (c *Coordinator) Done() bool {
 // MakeCoordinator create a Coordinator. main/mrcoordinator.go calls this function.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
-
-	c.NReducer = nReduce
-	c.TaskPipe = make(chan *Task)
-	c.WorkerCnt = 0
-	c.Phase = PhaseMap
-	c.generateMapTasks(files)
-
+	c.Initialize(files, nReduce)
 	c.server()
 	return &c
+}
+
+func (c *Coordinator) Initialize(files []string, nReduce int) {
+	c.NReducer = nReduce
+	c.TaskPipe = make(chan *Task, len(files))
+	c.WorkerCnt = 0
+	c.Phase = PhaseMap
+	c.ProcessingTasks = make(map[int]*Task)
+	c.Lock = sync.Mutex{}
+	c.generateMapTasks(files)
 }
 
 func (c *Coordinator) generateMapTasks(files []string) {
@@ -92,7 +106,7 @@ func (c *Coordinator) generateMapTasks(files []string) {
 			Progress:  Initiate,
 			Phase:     PhaseMap,
 		}
-		c.TaskPipe <- task
+		go func() { c.TaskPipe <- task }()
 		c.ProcessingTasks[task.ID] = task
 		id++
 	}
@@ -128,7 +142,7 @@ func (c *Coordinator) server() {
 	rpc.HandleHTTP()
 	//l, e := net.Listen("tcp", ":1234")
 	sockname := coordinatorSock()
-	os.RemoveAll(sockname)
+	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
 		log.Fatal("listen error:", e)
