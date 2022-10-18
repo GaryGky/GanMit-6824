@@ -57,7 +57,6 @@ func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerR
 }
 
 func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-
 	reply.SingleTask = <-c.TaskPipe
 	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: return task-%d to worker-%d \n", reply.SingleTask.ID, args.WorkerID)
 	return nil
@@ -68,6 +67,8 @@ func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply)
 
 	delete(c.ProcessingTasks, args.TaskID)
 	if len(c.ProcessingTasks) == 0 {
+		c.Lock.Lock()
+		defer c.Lock.Unlock()
 		switch c.Phase {
 		case PhaseMap:
 			c.generateReduceTasks()
@@ -82,6 +83,9 @@ func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply)
 
 // Done main/mrcoordinator.go calls Done() periodically to find out if the entire job has finished.
 func (c *Coordinator) Done() bool {
+	c.Lock.Lock()
+	defer c.Lock.Unlock()
+
 	return c.Phase == PhaseDone
 }
 
@@ -96,6 +100,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 func (c *Coordinator) Initialize(files []string, nReduce int) {
 	c.NReducer = nReduce
+	c.Files = files
 	c.TaskPipe = make(chan *Task, len(files))
 	c.WorkerCnt = 0
 	c.Phase = PhaseMap
@@ -124,12 +129,14 @@ func (c *Coordinator) generateMapTasks(files []string) {
 
 func (c *Coordinator) generateReduceTasks() {
 	rID2Files := make(map[int][]string)
+	debug.Debug(debug.DInfo, "Coordinator.generateReduceTasks: NReducer: %d, length of files: %d \n", c.NReducer, len(c.Files))
 	for i := 0; i < c.NReducer; i++ {
-		for j := 0; j < len(c.Files); j++ {
-			if j == 0 {
+		for j := 1; j <= len(c.Files); j++ {
+			if j == 1 {
 				rID2Files[i] = make([]string, 0)
 			}
 			rID2Files[i] = append(rID2Files[i], fmt.Sprintf("mr-%d-%d", j, i))
+			debug.Debug(debug.DInfo, "Coordinator.generateReduceTasks: %v \n", rID2Files[i])
 		}
 	}
 

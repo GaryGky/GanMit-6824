@@ -113,13 +113,12 @@ func (w *WorkerImpl) processMap(task *Task) error {
 	defer file.Close()
 	kva := w.MapFunc(filename, string(content))
 	intermediate = append(intermediate, kva...)
-	debug.Debug(debug.DInfo, "worker:%d execute map function on file:%v success \n", w.WorkerID, filename)
 
 	sort.Sort(ByKey(intermediate))
 	rID2FileEncoder := filenamesToFileEncoders(generateFilenames(w.NReducer, task.ID))
-	for i := 0; i < len(intermediate); {
+	for i := 0; i < len(intermediate); i++ {
 		hashKey := ihash(intermediate[i].Key) % w.NReducer
-		rID2FileEncoder[hashKey].Encode(intermediate[i])
+		rID2FileEncoder[hashKey].Encode(&intermediate[i])
 	}
 	return nil
 }
