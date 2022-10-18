@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	rDebug "runtime/debug"
 	"sync"
 	"time"
 
@@ -106,7 +107,9 @@ func (c *Coordinator) generateMapTasks(files []string) {
 			Progress:  Initiate,
 			Phase:     PhaseMap,
 		}
-		go func() { c.TaskPipe <- task }()
+		safeGo(func() {
+			c.TaskPipe <- task
+		})
 		c.ProcessingTasks[task.ID] = task
 		id++
 	}
@@ -131,7 +134,11 @@ func (c *Coordinator) generateReduceTasks() {
 			Phase:      PhaseReduce,
 			CreateTime: time.Now(),
 		}
-		c.TaskPipe <- task
+		safeGo(func() {
+			c.TaskPipe <- task
+		})
+		debug.Debug(debug.DInfo, "Task-%d: created, channel length now is:%d \n", task.ID, len(c.TaskPipe))
+
 		c.ProcessingTasks[task.ID] = task
 	}
 }
@@ -147,5 +154,17 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, nil)
+	go http.Serve(l, http.DefaultServeMux)
+}
+
+func RecoverAndLog() {
+	if err := recover(); err != nil {
+		stack := string(rDebug.Stack())
+		debug.Debug(debug.DError, "%v \n", stack)
+	}
+}
+
+func safeGo(fun func()) {
+	defer RecoverAndLog()
+	fun()
 }
