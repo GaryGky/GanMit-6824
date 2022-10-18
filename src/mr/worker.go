@@ -63,7 +63,7 @@ func (w *WorkerImpl) mainProcessor() {
 		r, err := rpcTaskQuery(int(w.WorkerID))
 		if err != nil {
 			debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
-			panic(err)
+			return
 		}
 
 		// set task status
@@ -128,9 +128,13 @@ func (w *WorkerImpl) processReduce(task *Task) error {
 	intermediate := make([]KeyValue, 0)
 	decoders := filenamesToFileDecoders(task.FileNames)
 	for _, dec := range decoders {
-		var kv KeyValue
-		dec.Decode(&kv)
-		intermediate = append(intermediate, kv)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
 	}
 	sort.Sort(ByKey(intermediate))
 
@@ -199,11 +203,11 @@ func filenamesToFileEncoders(filenames []string) map[int]*json.Encoder {
 	return rID2FileEncoder
 }
 
-func filenamesToFileDecoders(filenames []string) []*json.Decoder {
-	rID2FileEncoder := make([]*json.Decoder, len(filenames))
-	for i, filename := range filenames {
-		oFile, _ := os.Create(filename)
-		rID2FileEncoder[i] = json.NewDecoder(oFile)
+func filenamesToFileDecoders(filenames []string) map[string]*json.Decoder {
+	rID2FileEncoder := make(map[string]*json.Decoder)
+	for _, filename := range filenames {
+		oFile, _ := os.Open(filename)
+		rID2FileEncoder[filename] = json.NewDecoder(oFile)
 	}
 	return rID2FileEncoder
 }

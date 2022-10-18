@@ -16,6 +16,7 @@ import "net/http"
 
 type Progress int
 type Phase int
+type SyncMap sync.Map
 
 const (
 	Initiate   Progress = 1
@@ -41,9 +42,9 @@ type Coordinator struct {
 	WorkerCnt       int32 // worker count
 	NReducer        int
 	TaskPipe        chan *Task
-	Phase           Phase         // Track MapReduce Phase
-	ProcessingTasks map[int]*Task // Track Processing Tasks
-	Files           []string      // all the input files
+	Phase           Phase    // Track MapReduce Phase
+	ProcessingTasks sync.Map // Track Processing Tasks
+	Files           []string // all the input files
 	Lock            sync.Mutex
 }
 
@@ -57,7 +58,11 @@ func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerR
 }
 
 func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	reply.SingleTask = <-c.TaskPipe
+	task := <-c.TaskPipe
+	if task == nil {
+		return nil
+	}
+	reply.SingleTask = task
 	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: return task-%d to worker-%d \n", reply.SingleTask.ID, args.WorkerID)
 	return nil
 }
@@ -65,8 +70,8 @@ func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) erro
 func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply) error {
 	debug.Debug(debug.DInfo, "coordinator.HandleNotifyTask: %v\n", args)
 
-	delete(c.ProcessingTasks, args.TaskID)
-	if len(c.ProcessingTasks) == 0 {
+	c.ProcessingTasks.Delete(args.TaskID)
+	if (*SyncMap)(&c.ProcessingTasks).isEmpty() {
 		c.Lock.Lock()
 		defer c.Lock.Unlock()
 		switch c.Phase {
@@ -79,6 +84,15 @@ func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply)
 		}
 	}
 	return nil
+}
+
+func (sm *SyncMap) isEmpty() bool {
+	cnt := 0
+	(*sync.Map)(sm).Range(func(key, value interface{}) bool {
+		cnt++
+		return true
+	})
+	return cnt == 0
 }
 
 // Done main/mrcoordinator.go calls Done() periodically to find out if the entire job has finished.
@@ -104,7 +118,7 @@ func (c *Coordinator) Initialize(files []string, nReduce int) {
 	c.TaskPipe = make(chan *Task, len(files))
 	c.WorkerCnt = 0
 	c.Phase = PhaseMap
-	c.ProcessingTasks = make(map[int]*Task)
+	c.ProcessingTasks = sync.Map{}
 	c.Lock = sync.Mutex{}
 	c.generateMapTasks(files)
 }
@@ -122,7 +136,7 @@ func (c *Coordinator) generateMapTasks(files []string) {
 			c.TaskPipe <- task
 			debug.Debug(debug.DInfo, "Task-%d is put to channel, now has %d tasks \n", task.ID, len(c.TaskPipe))
 		})
-		c.ProcessingTasks[task.ID] = task
+		c.ProcessingTasks.Store(task.ID, task)
 		id++
 	}
 }
@@ -152,8 +166,7 @@ func (c *Coordinator) generateReduceTasks() {
 			c.TaskPipe <- task
 		})
 		debug.Debug(debug.DInfo, "Task-%d: created, channel length now is:%d \n", task.ID, len(c.TaskPipe))
-
-		c.ProcessingTasks[task.ID] = task
+		c.ProcessingTasks.Store(task.ID, task)
 	}
 }
 
