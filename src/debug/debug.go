@@ -9,7 +9,7 @@ import (
 
 var (
 	debugStart time.Time
-	debug      = 2
+	debug      = 0
 )
 
 type logTopic string

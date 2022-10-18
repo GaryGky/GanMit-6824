@@ -58,8 +58,12 @@ func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerR
 }
 
 func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) error {
-	task := <-c.TaskPipe
-	if task == nil {
+	task, ok := <-c.TaskPipe
+	if !ok {
+		// there are no more values to receive and the channel is closed
+		reply.SingleTask = &Task{
+			Phase: c.Phase,
+		}
 		return nil
 	}
 	reply.SingleTask = task

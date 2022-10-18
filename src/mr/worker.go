@@ -17,6 +17,8 @@ import "hash/fnv"
 
 var (
 	_errRPCFailed = errors.New("RPC Failed")
+
+	_breakTime = time.Second * 5
 )
 
 // KeyValue
@@ -64,6 +66,10 @@ func (w *WorkerImpl) mainProcessor() {
 		if err != nil {
 			debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			return
+		}
+		if r.SingleTask.Phase == PhaseDone {
+			debug.Debug(debug.DInfo, "worker-%d receive exit signal: %v \n", w.WorkerID, r.SingleTask.Phase)
+			break
 		}
 
 		// set task status
