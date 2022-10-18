@@ -5,12 +5,12 @@ import "strconv"
 
 // Add your RPC definitions here.
 
-type GetTaskArgs struct{}
+type GetTaskArgs struct {
+	WorkerID int
+}
 
 type GetTaskReply struct {
-	NReducer int
-	WorkerID int32
-	TaskPipe chan *Task
+	SingleTask *Task
 }
 
 type NotifyTaskArgs struct {
@@ -18,6 +18,14 @@ type NotifyTaskArgs struct {
 }
 
 type NotifyTaskReply struct{}
+
+type WorkerRegisterArgs struct {
+}
+
+type WorkerRegisterReply struct {
+	NReducer int
+	WorkerID int32
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

@@ -44,16 +44,12 @@ type WorkerImpl struct {
 // Worker
 // main/worker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
-	const errCtx = "mr.Worker.Initiate"
-	r, err := rpcTaskQuery()
+	r, err := rpcWorkerRegister()
 	if err != nil {
-		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
-		panic(err)
+		panic(fmt.Sprintf("worker init failed: %v \n", err))
 	}
-	debug.Debug(debug.DInfo, "Worker-%v: created \n", r.WorkerID)
 	impl := &WorkerImpl{
 		NReducer:   r.NReducer,
-		TaskPipe:   r.TaskPipe,
 		MapFunc:    mapf,
 		ReduceFunc: reducef,
 		WorkerID:   r.WorkerID,
@@ -62,10 +58,21 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 }
 func (w *WorkerImpl) mainProcessor() {
 	const errCtx = "mr.Worker.mainProcessor"
-	for task := range w.TaskPipe {
-		debug.Debug(debug.DInfo, "worker-%d receive task: %d", w.WorkerID, task.ID)
+	for {
+		// send rpc to query task
+		r, err := rpcTaskQuery(int(w.WorkerID))
+		if err != nil {
+			debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
+			panic(err)
+		}
+
+		// set task status
+		debug.Debug(debug.DInfo, "worker-%d receive task: %d \n", w.WorkerID, r.SingleTask.ID)
+		task := r.SingleTask
 		task.CreateTime = time.Now()
 		task.Progress = Processing
+
+		// process tasks based on task phase
 		switch task.Phase {
 		case PhaseMap:
 			if err := w.processMap(task); err != nil {
@@ -96,14 +103,17 @@ func (w *WorkerImpl) processMap(task *Task) error {
 	file, err := os.Open(filename)
 	if err != nil {
 		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
+		return err
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
 		debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
+		return err
 	}
 	defer file.Close()
 	kva := w.MapFunc(filename, string(content))
 	intermediate = append(intermediate, kva...)
+	debug.Debug(debug.DInfo, "worker:%d execute map function on file:%v success \n", w.WorkerID, filename)
 
 	sort.Sort(ByKey(intermediate))
 	rID2FileEncoder := filenamesToFileEncoders(generateFilenames(w.NReducer, task.ID))
@@ -145,8 +155,8 @@ func (w *WorkerImpl) processReduce(task *Task) error {
 }
 
 // RPC Call on Worker Init: Get task channel from coordinator
-func rpcTaskQuery() (GetTaskReply, error) {
-	args := GetTaskArgs{}
+func rpcTaskQuery(workerID int) (GetTaskReply, error) {
+	args := GetTaskArgs{WorkerID: workerID}
 	reply := GetTaskReply{}
 	ok := call("Coordinator.HandleGetTask", &args, &reply)
 	if ok {
@@ -161,6 +171,14 @@ func rpcTaskNotify(args NotifyTaskArgs) error {
 		return _errRPCFailed
 	}
 	return nil
+}
+
+func rpcWorkerRegister() (WorkerRegisterReply, error) {
+	resp := WorkerRegisterReply{}
+	if ok := call("Coordinator.HandleWorkerRegister", &WorkerRegisterArgs{}, &resp); !ok {
+		return resp, _errRPCFailed
+	}
+	return resp, nil
 }
 
 // generate filenames based on nReducer and taskID

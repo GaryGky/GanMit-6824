@@ -47,14 +47,19 @@ type Coordinator struct {
 	Lock            sync.Mutex
 }
 
-func (c *Coordinator) HandleGetTask(_ *GetTaskArgs, reply *GetTaskReply) error {
+func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerRegisterReply) error {
 	c.Lock.Lock()
 	defer c.Lock.Unlock()
-	reply.TaskPipe = c.TaskPipe
 	reply.WorkerID = c.WorkerCnt
+	reply.NReducer = c.NReducer
 	c.WorkerCnt++
+	return nil
+}
 
-	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: %v \n", reply)
+func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) error {
+
+	reply.SingleTask = <-c.TaskPipe
+	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: return task-%d to worker-%d \n", reply.SingleTask.ID, args.WorkerID)
 	return nil
 }
 
@@ -84,6 +89,7 @@ func (c *Coordinator) Done() bool {
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{}
 	c.Initialize(files, nReduce)
+	debug.Debug(debug.DInfo, "Coordinator is ready to serve... \n")
 	c.server()
 	return &c
 }
@@ -109,6 +115,7 @@ func (c *Coordinator) generateMapTasks(files []string) {
 		}
 		safeGo(func() {
 			c.TaskPipe <- task
+			debug.Debug(debug.DInfo, "Task-%d is put to channel, now has %d tasks \n", task.ID, len(c.TaskPipe))
 		})
 		c.ProcessingTasks[task.ID] = task
 		id++
