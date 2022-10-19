@@ -86,7 +86,6 @@ func (w *WorkerImpl) mainProcessor() {
 			if err := rpcTaskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
-			debug.Debug(debug.DInfo, "Worker.mainProcess: Task-%d, Phase:%v has been done \n", task.ID, task.Phase)
 		case PhaseReduce:
 			if err := w.processReduce(task); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
@@ -95,7 +94,6 @@ func (w *WorkerImpl) mainProcessor() {
 			if err := rpcTaskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
-			debug.Debug(debug.DInfo, "Task-%d, Phase:%v has been done \n", task.ID, task.Phase)
 		}
 	}
 }

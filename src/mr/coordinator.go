@@ -40,13 +40,14 @@ type Task struct {
 }
 
 type Coordinator struct {
-	WorkerCnt       int32 // worker count
-	NReducer        int
-	TaskPipe        chan *Task
-	Phase           Phase    // Track MapReduce Phase
-	ProcessingTasks sync.Map // Track Processing Tasks: (Key: taskID, Value: Task)
-	Files           []string // all the input files
-	PhaseLock       sync.Mutex
+	WorkerCnt        int32 // worker count
+	NReducer         int
+	TaskPipe         chan *Task
+	Phase            Phase    // Track MapReduce Phase
+	ProcessingTasks  sync.Map // Track Processing Tasks: (Key: taskID, Value: Task)
+	Files            []string // all the input files
+	PhaseLock        sync.Mutex
+	TimeoutCheckLock sync.RWMutex
 }
 
 func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerRegisterReply) error {
@@ -59,6 +60,7 @@ func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerR
 }
 
 func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) error {
+	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: received request from worker-%d \n", args.WorkerID)
 	task, ok := <-c.TaskPipe
 	if !ok {
 		// there are no more values to receive and the channel is closed
@@ -68,6 +70,9 @@ func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) erro
 		return nil
 	}
 
+	c.TimeoutCheckLock.RLock()
+	defer c.TimeoutCheckLock.RUnlock()
+
 	reply.SingleTask = task
 	task.CreateTime = time.Now()
 	task.Progress = Processing
@@ -76,7 +81,7 @@ func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) erro
 }
 
 func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply) error {
-	debug.Debug(debug.DInfo, "coordinator.HandleNotifyTask: %v\n", args)
+	debug.Debug(debug.DInfo, "coordinator.HandleNotifyTask: task-%d is done\n", args.TaskID)
 
 	c.ProcessingTasks.Delete(args.TaskID)
 	if (*SyncMap)(&c.ProcessingTasks).isEmpty() {
@@ -128,6 +133,7 @@ func (c *Coordinator) Initialize(files []string, nReduce int) {
 	c.Phase = PhaseMap
 	c.ProcessingTasks = sync.Map{}
 	c.PhaseLock = sync.Mutex{}
+	c.TimeoutCheckLock = sync.RWMutex{}
 	c.generateMapTasks(files)
 }
 
@@ -192,25 +198,27 @@ func (c *Coordinator) server() {
 	go safeGo(func() {
 		http.Serve(l, http.DefaultServeMux)
 	})
-	// c.checkTimeoutTask()
+	go safeGo(func() {
+		c.checkTimeoutTask() // 可能会退出不了
+	})
 }
 
 // periodically check c.ProcessingTasks and assign timeout tasks to new worker
 func (c *Coordinator) checkTimeoutTask() {
 	s := gocron.NewScheduler(time.UTC)
 	s.Every(10).Seconds().Do(func() {
+		c.TimeoutCheckLock.Lock()
+		defer c.TimeoutCheckLock.Unlock()
 		c.ProcessingTasks.Range(func(key, value interface{}) bool {
 			task := value.(*Task)
 			if time.Since(task.CreateTime) >= time.Second*10 {
-				task.Progress = Initiate
-				task.CreateTime = time.Now()
 				c.TaskPipe <- task
 				debug.Debug(debug.DWarn, "task:%d is timeout\n", task.ID)
 			}
 			return true
 		})
 	})
-	s.StartBlocking()
+	s.StartAsync()
 }
 
 func RecoverAndLog() {
