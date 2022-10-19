@@ -199,7 +199,7 @@ func (c *Coordinator) server() {
 		http.Serve(l, http.DefaultServeMux)
 	})
 	go safeGo(func() {
-		c.checkTimeoutTask() // 可能会退出不了
+		c.checkTimeoutTask()
 	})
 }
 
