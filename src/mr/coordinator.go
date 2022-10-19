@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"6.824/debug"
+	"github.com/go-co-op/gocron"
 )
 import "net"
 import "net/rpc"
@@ -43,14 +44,14 @@ type Coordinator struct {
 	NReducer        int
 	TaskPipe        chan *Task
 	Phase           Phase    // Track MapReduce Phase
-	ProcessingTasks sync.Map // Track Processing Tasks
+	ProcessingTasks sync.Map // Track Processing Tasks: (Key: taskID, Value: Task)
 	Files           []string // all the input files
-	Lock            sync.Mutex
+	PhaseLock       sync.Mutex
 }
 
 func (c *Coordinator) HandleWorkerRegister(_ *WorkerRegisterArgs, reply *WorkerRegisterReply) error {
-	c.Lock.Lock()
-	defer c.Lock.Unlock()
+	c.PhaseLock.Lock()
+	defer c.PhaseLock.Unlock()
 	reply.WorkerID = c.WorkerCnt
 	reply.NReducer = c.NReducer
 	c.WorkerCnt++
@@ -66,7 +67,10 @@ func (c *Coordinator) HandleGetTask(args *GetTaskArgs, reply *GetTaskReply) erro
 		}
 		return nil
 	}
+
 	reply.SingleTask = task
+	task.CreateTime = time.Now()
+	task.Progress = Processing
 	debug.Debug(debug.DInfo, "coordinator.HandleGetTask: return task-%d to worker-%d \n", reply.SingleTask.ID, args.WorkerID)
 	return nil
 }
@@ -76,8 +80,8 @@ func (c *Coordinator) HandleNotifyTask(args *NotifyTaskArgs, _ *NotifyTaskReply)
 
 	c.ProcessingTasks.Delete(args.TaskID)
 	if (*SyncMap)(&c.ProcessingTasks).isEmpty() {
-		c.Lock.Lock()
-		defer c.Lock.Unlock()
+		c.PhaseLock.Lock()
+		defer c.PhaseLock.Unlock()
 		switch c.Phase {
 		case PhaseMap:
 			c.generateReduceTasks()
@@ -101,9 +105,9 @@ func (sm *SyncMap) isEmpty() bool {
 
 // Done main/mrcoordinator.go calls Done() periodically to find out if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	c.Lock.Lock()
-	defer c.Lock.Unlock()
-
+	c.PhaseLock.Lock()
+	defer c.PhaseLock.Unlock()
+	debug.Debug(debug.DInfo, "Coordinator. Phase: %v \n", c.Phase)
 	return c.Phase == PhaseDone
 }
 
@@ -123,7 +127,7 @@ func (c *Coordinator) Initialize(files []string, nReduce int) {
 	c.WorkerCnt = 0
 	c.Phase = PhaseMap
 	c.ProcessingTasks = sync.Map{}
-	c.Lock = sync.Mutex{}
+	c.PhaseLock = sync.Mutex{}
 	c.generateMapTasks(files)
 }
 
@@ -131,10 +135,11 @@ func (c *Coordinator) generateMapTasks(files []string) {
 	id := 1
 	for _, file := range files {
 		task := &Task{
-			ID:        id,
-			FileNames: []string{file},
-			Progress:  Initiate,
-			Phase:     PhaseMap,
+			ID:         id,
+			FileNames:  []string{file},
+			Progress:   Initiate,
+			Phase:      PhaseMap,
+			CreateTime: time.Now().Add(time.Minute),
 		}
 		safeGo(func() {
 			c.TaskPipe <- task
@@ -154,7 +159,6 @@ func (c *Coordinator) generateReduceTasks() {
 				rID2Files[i] = make([]string, 0)
 			}
 			rID2Files[i] = append(rID2Files[i], fmt.Sprintf("mr-%d-%d", j, i))
-			debug.Debug(debug.DInfo, "Coordinator.generateReduceTasks: %v \n", rID2Files[i])
 		}
 	}
 
@@ -164,7 +168,7 @@ func (c *Coordinator) generateReduceTasks() {
 			FileNames:  files,
 			Progress:   Initiate,
 			Phase:      PhaseReduce,
-			CreateTime: time.Now(),
+			CreateTime: time.Now().Add(time.Minute),
 		}
 		safeGo(func() {
 			c.TaskPipe <- task
@@ -185,7 +189,28 @@ func (c *Coordinator) server() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
-	go http.Serve(l, http.DefaultServeMux)
+	go safeGo(func() {
+		http.Serve(l, http.DefaultServeMux)
+	})
+	// c.checkTimeoutTask()
+}
+
+// periodically check c.ProcessingTasks and assign timeout tasks to new worker
+func (c *Coordinator) checkTimeoutTask() {
+	s := gocron.NewScheduler(time.UTC)
+	s.Every(10).Seconds().Do(func() {
+		c.ProcessingTasks.Range(func(key, value interface{}) bool {
+			task := value.(*Task)
+			if time.Since(task.CreateTime) >= time.Second*10 {
+				task.Progress = Initiate
+				task.CreateTime = time.Now()
+				c.TaskPipe <- task
+				debug.Debug(debug.DWarn, "task:%d is timeout\n", task.ID)
+			}
+			return true
+		})
+	})
+	s.StartBlocking()
 }
 
 func RecoverAndLog() {

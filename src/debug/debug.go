@@ -2,14 +2,16 @@ package debug
 
 import (
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"time"
 )
 
 var (
 	debugStart time.Time
-	debug      = 0
+	debug      = 2
+
+	oFile io.Writer
 )
 
 type logTopic string
@@ -35,17 +37,17 @@ const (
 
 func init() {
 	debugStart = time.Now()
-
-	log.SetOutput(os.Stdout)
-	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
+	//oFile, _ = os.Create("output.log")
+	oFile = os.Stdout
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
+
 	if debug >= 1 {
 		t := time.Since(debugStart).Microseconds()
 		t /= 100
 		prefix := fmt.Sprintf("%06d %v ", t, string(topic))
 		format = prefix + format
-		fmt.Printf(format, a...)
+		fmt.Fprintf(oFile, format, a...)
 	}
 }

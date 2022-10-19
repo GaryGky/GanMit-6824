@@ -75,8 +75,6 @@ func (w *WorkerImpl) mainProcessor() {
 		// set task status
 		debug.Debug(debug.DInfo, "worker-%d receive task: %d \n", w.WorkerID, r.SingleTask.ID)
 		task := r.SingleTask
-		task.CreateTime = time.Now()
-		task.Progress = Processing
 
 		// process tasks based on task phase
 		switch task.Phase {
@@ -88,7 +86,7 @@ func (w *WorkerImpl) mainProcessor() {
 			if err := rpcTaskNotify(NotifyTaskArgs{TaskID: task.ID}); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
 			}
-			debug.Debug(debug.DInfo, "Task-%d, Phase:%v has been done \n", task.ID, task.Phase)
+			debug.Debug(debug.DInfo, "Worker.mainProcess: Task-%d, Phase:%v has been done \n", task.ID, task.Phase)
 		case PhaseReduce:
 			if err := w.processReduce(task); err != nil {
 				debug.Debug(debug.DError, "%v: %v \n", errCtx, err)
