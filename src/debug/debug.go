@@ -3,13 +3,14 @@ package debug
 import (
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"time"
 )
 
 var (
 	debugStart time.Time
-	debug      = 0
+	debug      = 1
 
 	oFile io.Writer
 )
@@ -37,8 +38,11 @@ const (
 
 func init() {
 	debugStart = time.Now()
-	//oFile, _ = os.Create("output.log")
-	oFile = os.Stdout
+	os.RemoveAll("debug.log")
+	oFile, _ = os.Create("debug.log")
+	//oFile = os.Stdout
+	log.SetOutput(oFile)
+	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }
 
 func Debug(topic logTopic, format string, a ...interface{}) {
@@ -48,6 +52,6 @@ func Debug(topic logTopic, format string, a ...interface{}) {
 		t /= 100
 		prefix := fmt.Sprintf("%06d %v ", t, string(topic))
 		format = prefix + format
-		fmt.Fprintf(oFile, format, a...)
+		log.Printf(format, a...)
 	}
 }

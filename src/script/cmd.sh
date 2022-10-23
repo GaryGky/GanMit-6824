@@ -7,3 +7,6 @@ clean:
   mkdir mr-tmp || exit 1
   cd mr-tmp || exit 1
   rm -f mr-*
+
+pretty-log:
+   ./script/dslog.py ./raft/debug.log -j ERRO,CLNT,LEAD
