@@ -199,9 +199,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 // The ticker go routine starts a new election if this peer hasn't received heartbeats recently.
 func (rf *Raft) ticker() {
 	for rf.killed() == false {
-		if !rf.IsLeaderAlive.Load() {
+		if !rf.IsLeaderAlive.Load() && rf.voteFor.Load() == int32(-1) {
 			rf.startElection()
 		}
+		rf.IsLeaderAlive.Store(false)
+		rf.voteFor.Store(-1)
 		time.Sleep(ElectionTimeout)
 		time.Sleep(randomTime())
 	}
@@ -221,7 +223,10 @@ func (rf *Raft) heartBeat() {
 				reply := &AppendEntryReply{}
 				ok := rf.sendAppendEntry(server, req, reply)
 				if !ok {
-					debug.Debug(debug.DError, "S%d startElection failed, to S%d \n", rf.me, server)
+					debug.Debug(debug.DError, "S%d -> S%d, heartbeat failed \n", rf.me, server)
+				}
+				if !reply.Success {
+					rf.becomeFollower()
 				}
 			}(i)
 		}
@@ -247,9 +252,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 	if reply.VoteGranted {
 		rf.VotesFromPeers.Add(1)
-	}
-	if rf.VotesFromPeers.Load() == int32((len(rf.peers)+1)/2) {
-		rf.becomeLeader()
+		if rf.VotesFromPeers.Load() == int32((len(rf.peers)+1)/2) {
+			rf.becomeLeader()
+		}
 	}
 	return ok
 }
@@ -272,24 +277,25 @@ func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Base.FromNodeID = rf.me
 	reply.Term = int32(max(int(rf.CurrentTerm.Load()), arg.Term))
 
-	//from, to := arg.GetAllCaseByUserID()
-	//debug.Debug(debug.DClient, "S%d receive RequestVote from S%d, %v \n", from, to, arg)
-
 	// already vote for current term
-	if rf.voteFor.Load() != int32(-1) && int(rf.CurrentTerm.Load()) >= arg.Term {
+	if arg.Term < int(rf.CurrentTerm.Load()) {
 		reply.VoteGranted = false
 		return
 	}
-
-	// vote for candidate in args
-	rf.voteFor.Store(int32(arg.Base.FromNodeID))
-	rf.CurrentTerm.Store(int32(max(int(rf.CurrentTerm.Load()), arg.Term)))
-	reply.VoteGranted = int(rf.CurrentTerm.Load()) == arg.Term
+	if rf.voteFor.Load() == int32(-1) || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
+		// vote for candidate in args
+		rf.voteFor.Store(int32(arg.Base.FromNodeID))
+		rf.CurrentTerm.Store(int32(max(int(rf.CurrentTerm.Load()), arg.Term)))
+		reply.VoteGranted = int(rf.CurrentTerm.Load()) == arg.Term
+		return
+	}
+	reply.VoteGranted = false
 }
 
 func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	from, _ := arg.GetAllCaseByUserID()
-	//debug.Debug(debug.DCommit, "S%d receive RequestVote from S%d, %v \n", from, to, arg)
+	reply.Term = int(rf.CurrentTerm.Load())
+
 	if arg.Term < int(rf.CurrentTerm.Load()) {
 		reply.Success = false
 		return
@@ -299,6 +305,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 
 	// become follower
 	rf.LeaderID.Swap(int32(from))
+	rf.IsLeaderAlive.Store(true)
 	reply.Success = true
 }
 
@@ -310,9 +317,21 @@ func (rf *Raft) becomeLeader() {
 	go rf.heartBeat()
 }
 
-func (rf *Raft) startElection() {
+func (rf *Raft) becomeCandidate() {
+	rf.voteFor.Store(-1)
 	rf.VotesFromPeers.Swap(0)
 	rf.CurrentTerm.Add(1)
+}
+
+func (rf *Raft) becomeFollower() {
+	rf.voteFor.Store(-1)
+	rf.VotesFromPeers.Store(0)
+	rf.LeaderID.Store(-1)
+	rf.IsLeaderAlive.Store(false)
+}
+
+func (rf *Raft) startElection() {
+	rf.becomeCandidate()
 
 	// send RequestVoteRPC to all peers
 	for i := range rf.peers {
@@ -328,7 +347,7 @@ func (rf *Raft) startElection() {
 			reply := &RequestVoteReply{}
 			ok := rf.sendRequestVote(server, req, reply)
 			if !ok {
-				debug.Debug(debug.DError, "S%d startElection failed, to S%d \n", rf.me, i)
+				debug.Debug(debug.DError, "S%d startElection failed, to S%d \n", rf.me, server)
 			}
 		}(i)
 	}

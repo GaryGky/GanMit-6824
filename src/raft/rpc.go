@@ -6,8 +6,8 @@ import (
 )
 
 type Base struct {
-	FromNodeID int `json:"from_node_id"`
-	ToNodeID   int `json:"to_node_id"`
+	FromNodeID int
+	ToNodeID   int
 }
 
 type BaseMessage interface {
@@ -52,11 +52,12 @@ type RequestVoteReply struct {
 }
 
 type AppendEntryArgs struct {
-	Term int `json:"term"`
+	Term int
 	Base Base
 }
 
 type AppendEntryReply struct {
+	Term    int
 	Success bool
 	Base    Base
 }
