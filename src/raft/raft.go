@@ -43,9 +43,12 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// All State
-	CurrentTerm atomic.Int32
-	LeaderID    atomic.Int32
-	applyChan   chan ApplyMsg
+	LocalLog         []interface{}
+	CurrentTerm      atomic.Int32
+	LeaderID         atomic.Int32
+	CommitIndex      atomic.Int32
+	LastAppliedIndex atomic.Int32
+	applyChan        chan ApplyMsg
 
 	// Follower States
 	IsLeaderAlive atomic.Bool // Follower to check whether it should start a new election
@@ -54,14 +57,10 @@ type Raft struct {
 	VotesFromPeers atomic.Int32
 
 	// Leader States
-
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-
 	return int(rf.CurrentTerm.Load()), int(rf.LeaderID.Load()) == rf.me
 }
 
@@ -121,24 +120,26 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // Start
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise start the
+// server isn't the leader, returns false. otherwise, start the
 // agreement and return immediately. there is no guarantee that this
 // command will ever be committed to the Raft log, since the leader
 // may fail or lose an election. even if the Raft instance has been killed,
 // this function should return gracefully.
-//
-// the first return value is the index that the command will appear at
+
+// Start the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
-	isLeader := true
+	if !rf.isLeader() {
+		return index, term, false
+	}
 
-	// Your code here (2B).
+	// Leader should start synchronize log here
 
-	return index, term, isLeader
+	return index, term, rf.isLeader()
 }
 
 // Kill
@@ -176,6 +177,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
+	rf.mu = sync.Mutex{}
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.VotesFromPeers = atomic.Int32{}
@@ -184,6 +186,12 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.voteFor = atomic.Int32{}
 	rf.voteFor.Store(-1)
 	rf.IsLeaderAlive.Store(false)
+	rf.LocalLog = make([]interface{}, 0)
+	rf.CommitIndex = atomic.Int32{}
+	rf.CommitIndex.Store(-1)
+	rf.LastAppliedIndex = atomic.Int32{}
+	rf.LastAppliedIndex.Store(-1)
+	rf.applyChan = make(chan ApplyMsg)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -210,7 +218,7 @@ func (rf *Raft) ticker() {
 }
 
 func (rf *Raft) heartBeat() {
-	for int(rf.LeaderID.Load()) == rf.me {
+	for rf.isLeader() {
 		for i := range rf.peers {
 			req := &AppendEntryArgs{
 				Term: int(rf.CurrentTerm.Load()),
@@ -300,9 +308,6 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = false
 		return
 	}
-	rf.mu.Lock()
-	rf.mu.Unlock()
-
 	// become follower
 	rf.LeaderID.Swap(int32(from))
 	rf.IsLeaderAlive.Store(true)
@@ -330,6 +335,10 @@ func (rf *Raft) becomeFollower() {
 	rf.LeaderID.Store(-1)
 	rf.IsLeaderAlive.Store(false)
 	debug.Debug(debug.DLeader, "S%d becomes Follower in Term %d \n", rf.me, rf.CurrentTerm.Load())
+}
+
+func (rf *Raft) isLeader() bool {
+	return int(rf.LeaderID.Load()) == rf.me
 }
 
 func (rf *Raft) startElection() {

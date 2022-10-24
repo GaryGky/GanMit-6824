@@ -12,6 +12,7 @@ type Base struct {
 
 type BaseMessage interface {
 	GetAllCaseByUserID() (int, int)
+	PrintDebugInfo()
 }
 
 // ApplyMsg
@@ -38,9 +39,9 @@ type ApplyMsg struct {
 
 // RequestVoteArgs Candidate start a election period
 type RequestVoteArgs struct {
-	// Your data here (2A, 2B).
-	Term int
-	Base Base
+	LastLogIndex, LastLogTerm int
+	Term                      int
+	Base                      Base
 }
 
 // RequestVoteReply Candidate receive reply from other candidate or follower
@@ -52,8 +53,11 @@ type RequestVoteReply struct {
 }
 
 type AppendEntryArgs struct {
-	Term int
-	Base Base
+	Term                      int
+	PrevLogIndex, PrevLogTerm int
+	LeaderCommit              int
+	Entries                   []interface{}
+	Base                      Base
 }
 
 type AppendEntryReply struct {
@@ -65,23 +69,37 @@ type AppendEntryReply struct {
 func (r *RequestVoteArgs) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
+func (r *RequestVoteArgs) PrintDebugInfo() {
+	debug.Debug(debug.DClient, "S%d -> S%d, %s RequestVoteArgs:{Term: %d, LastLogIndex: %d, LastLogTerm: %d} \n",
+		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.LastLogIndex, r.LastLogTerm)
+}
 
 func (r *RequestVoteReply) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
+}
+func (r *RequestVoteReply) PrintDebugInfo() {
+	debug.Debug(debug.DClient, "S%d -> S%d, %s RequestVoteReply:{Term: %d, Granted: %v} %v \n",
+		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.VoteGranted)
 }
 
 func (r *AppendEntryArgs) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
+func (r *AppendEntryArgs) PrintDebugInfo() {
+	debug.Debug(debug.DClient, "S%d -> S%d, %s AppendEntryArgs:{Term: %d, PrevLog: {Index: %d, Term: %d}, LeaderCommit: %d, Entries: %v} \n",
+		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.PrevLogIndex, r.PrevLogTerm, r.LeaderCommit, r.Entries)
+}
 
 func (r *AppendEntryReply) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
+func (r *AppendEntryReply) PrintDebugInfo() {
+	debug.Debug(debug.DClient, "S%d -> S%d, %s AppendEntryReply: {Term: %d, Success: %v} \n", r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.Success)
+}
 
 func rpcCall(endpoint *labrpc.ClientEnd, method string, args BaseMessage, reply BaseMessage) bool {
-	from, to := args.GetAllCaseByUserID()
-	debug.Debug(debug.DClient, "S%d -> S%d, %s request: %v \n", from, to, method, args)
+	args.PrintDebugInfo()
 	ok := endpoint.Call(method, args, reply)
-	debug.Debug(debug.DClient, "S%d <- S%d, %s response: %v \n", from, to, method, reply)
+	reply.PrintDebugInfo()
 	return ok
 }
