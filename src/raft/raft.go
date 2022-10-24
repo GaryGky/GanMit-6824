@@ -29,9 +29,9 @@ import (
 
 var (
 	// ElectionTimeout Within the range if there's no heartbeat from leader, Raft will start an election
-	ElectionTimeout = time.Second * 2
+	ElectionTimeout = time.Millisecond * 500
 	// HeartBeatTimeout within the range leader should send a heartbeat to all server
-	HeartBeatTimeout = time.Second * 1
+	HeartBeatTimeout = time.Millisecond * 250
 )
 
 // Raft object implementing a single Raft peer.
@@ -282,7 +282,7 @@ func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGranted = false
 		return
 	}
-	if rf.voteFor.Load() == int32(-1) || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
+	if canVoteForCandidate(rf.voteFor.Load(), int32(arg.Term), rf.CurrentTerm.Load(), arg.Base.FromNodeID) {
 		// vote for candidate in args
 		rf.voteFor.Store(int32(arg.Base.FromNodeID))
 		rf.CurrentTerm.Store(int32(max(int(rf.CurrentTerm.Load()), arg.Term)))
@@ -321,6 +321,7 @@ func (rf *Raft) becomeCandidate() {
 	rf.voteFor.Store(-1)
 	rf.VotesFromPeers.Swap(0)
 	rf.CurrentTerm.Add(1)
+	debug.Debug(debug.DLeader, "S%d becomes Candidate in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
 func (rf *Raft) becomeFollower() {
@@ -328,6 +329,7 @@ func (rf *Raft) becomeFollower() {
 	rf.VotesFromPeers.Store(0)
 	rf.LeaderID.Store(-1)
 	rf.IsLeaderAlive.Store(false)
+	debug.Debug(debug.DLeader, "S%d becomes Follower in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
 func (rf *Raft) startElection() {

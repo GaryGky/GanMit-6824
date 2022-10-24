@@ -37,3 +37,7 @@ func safeGo(fun func()) {
 func randomTime() time.Duration {
 	return time.Duration(rand.Intn(10)) * time.Millisecond
 }
+
+func canVoteForCandidate(voteFor int32, reqTerm, currentTerm int32, fromNodeID int) bool {
+	return reqTerm > currentTerm || voteFor == -1 || fromNodeID == int(voteFor)
+}

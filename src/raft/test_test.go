@@ -10,8 +10,6 @@ package raft
 
 import (
 	"testing"
-
-	"6.824/debug"
 )
 import "fmt"
 import "time"
@@ -65,25 +63,18 @@ func TestReElection2A(t *testing.T) {
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
-	debug.Debug(debug.DTest, "disconnect S%d \n", leader1)
 	cfg.checkOneLeader()
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
 	// should switch to follower.
 	cfg.connect(leader1)
-	debug.Debug(debug.DTest, "connect S%d \n", leader1)
-
 	leader2 := cfg.checkOneLeader()
 
 	// if there's no quorum, no new leader should
 	// be elected.
 	cfg.disconnect(leader2)
-	debug.Debug(debug.DTest, "disconnect S%d \n", leader2)
-
 	cfg.disconnect((leader2 + 1) % servers)
-	debug.Debug(debug.DTest, "disconnect S%d \n", (leader2+1)%servers)
-
 	time.Sleep(2 * RaftElectionTimeout)
 
 	// check that the one connected server
@@ -92,14 +83,10 @@ func TestReElection2A(t *testing.T) {
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
-	debug.Debug(debug.DTest, "connect S%d \n", (leader2+1)%servers)
-
 	cfg.checkOneLeader()
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
-	debug.Debug(debug.DTest, "connect S%d \n", leader2)
-
 	cfg.checkOneLeader()
 
 	cfg.end()
