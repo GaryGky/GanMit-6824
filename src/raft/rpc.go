@@ -55,8 +55,8 @@ type RequestVoteReply struct {
 type AppendEntryArgs struct {
 	Term                      int
 	PrevLogIndex, PrevLogTerm int
-	LeaderCommit              int
-	Entries                   []interface{}
+	LeaderCommit              int32
+	Entries                   []Log
 	Base                      Base
 }
 

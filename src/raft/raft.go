@@ -34,6 +34,11 @@ var (
 	HeartBeatTimeout = time.Millisecond * 250
 )
 
+type Log struct {
+	Term    int32
+	Command interface{}
+}
+
 // Raft object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // PhaseLock to protect shared access to this peer's state
@@ -43,7 +48,7 @@ type Raft struct {
 	dead      int32               // set by Kill()
 
 	// All State
-	LocalLog         []interface{}
+	LocalLog         []Log
 	CurrentTerm      atomic.Int32
 	LeaderID         atomic.Int32
 	CommitIndex      atomic.Int32
@@ -57,6 +62,9 @@ type Raft struct {
 	VotesFromPeers atomic.Int32
 
 	// Leader States
+	NextIndex  sync.Map
+	MatchIndex sync.Map
+	LogAck     sync.Map
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
@@ -136,9 +144,45 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !rf.isLeader() {
 		return index, term, false
 	}
-
+	rf.LocalLog = append(rf.LocalLog, Log{
+		Term:    rf.CurrentTerm.Load(),
+		Command: command,
+	})
 	// Leader should start synchronize log here
+	li, lt := rf.getPrevLogIndexAndTerm()
+	for i := range rf.peers {
+		go func(server int) {
+			RecoverAndLog()
+			reply := AppendEntryReply{}
+			ok := rf.sendAppendEntry(server, &AppendEntryArgs{
+				Term:         int(rf.CurrentTerm.Load()),
+				PrevLogIndex: li,
+				PrevLogTerm:  lt,
+				LeaderCommit: rf.CommitIndex.Load(),
+				Entries:      rf.LocalLog,
+				Base: Base{
+					FromNodeID: rf.me,
+					ToNodeID:   server,
+				},
+			}, &reply)
+			if !ok {
+				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
+				return
+			}
+			if reply.Success {
+				v, ok := rf.LogAck.Load(li + 1)
+				if !ok {
+					rf.LogAck.Store(li+1, 1)
+				} else {
+					rf.LogAck.Store(li+1, v.(int)+1)
+				}
 
+				if v.(int)+1 == (len(rf.peers)+1)/2 {
+					// TODO: leader can commit here
+				}
+			}
+		}(i)
+	}
 	return index, term, rf.isLeader()
 }
 
@@ -186,12 +230,15 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.voteFor = atomic.Int32{}
 	rf.voteFor.Store(-1)
 	rf.IsLeaderAlive.Store(false)
-	rf.LocalLog = make([]interface{}, 0)
+	rf.LocalLog = make([]Log, 0)
 	rf.CommitIndex = atomic.Int32{}
 	rf.CommitIndex.Store(-1)
 	rf.LastAppliedIndex = atomic.Int32{}
 	rf.LastAppliedIndex.Store(-1)
 	rf.applyChan = make(chan ApplyMsg)
+	rf.NextIndex = sync.Map{}
+	rf.MatchIndex = sync.Map{}
+	rf.LogAck = sync.Map{}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -267,14 +314,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 	return ok
 }
 
+// sendAppendEntry in heartbeat and log replication
 func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) bool {
-	endPoint := rf.peers[server]
-	ok := rpcCall(endPoint, "Raft.AppendEntry", args, reply)
-	if !ok {
-		return false
-	}
-	// todo: check the reply and see if some logs have reach consensus
-	return true
+	return rpcCall(rf.peers[server], "Raft.AppendEntry", args, reply)
 }
 
 // -------- RPC Handler ----------
@@ -339,6 +381,16 @@ func (rf *Raft) becomeFollower() {
 
 func (rf *Raft) isLeader() bool {
 	return int(rf.LeaderID.Load()) == rf.me
+}
+
+func (rf *Raft) getPrevLogIndexAndTerm() (int, int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	l := len(rf.LocalLog)
+	if l == 1 {
+		return 0, 0
+	}
+	return l - 2, int(rf.LocalLog[l-2].Term)
 }
 
 func (rf *Raft) startElection() {
