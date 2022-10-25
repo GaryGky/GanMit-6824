@@ -32,6 +32,8 @@ var (
 	ElectionTimeout = time.Millisecond * 500
 	// HeartBeatTimeout within the range leader should send a heartbeat to all server
 	HeartBeatTimeout = time.Millisecond * 250
+	// ApplyTimeout within the range, every node should check local logs from (lastApplied, commitIndex]
+	ApplyTimeout = time.Millisecond * 500
 )
 
 type Log struct {
@@ -272,6 +274,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
+	go rf.committedLogTimer()
 
 	return rf
 }
@@ -329,6 +332,7 @@ func (rf *Raft) committedLogTimer() {
 				CommandIndex: int(lastAppliedIndex) + i,
 			}
 		}
+		time.Sleep(ApplyTimeout)
 	}
 }
 
