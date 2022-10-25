@@ -8,15 +8,29 @@ import (
 	"6.824/debug"
 )
 
-func min(a, b int) int {
+func minInt32(a, b int32) int32 {
 	if a < b {
 		return a
 	}
 	return b
 }
 
-func max(a, b int) int {
+func maxInt32(a, b int32) int32 {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
 		return a
 	}
 	return b
@@ -29,9 +43,16 @@ func RecoverAndLog() {
 	}
 }
 
-func safeGo(fun func()) {
-	defer RecoverAndLog()
-	fun()
+func isLogConflict(afterLog, replicateLogs []Log) bool {
+	if len(afterLog) > len(replicateLogs) {
+		return false
+	}
+	for i := 0; i < len(replicateLogs); i++ {
+		if afterLog[i].Term != replicateLogs[i].Term {
+			return false
+		}
+	}
+	return true
 }
 
 func randomTime() time.Duration {

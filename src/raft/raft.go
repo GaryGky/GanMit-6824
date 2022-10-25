@@ -45,7 +45,7 @@ type Raft struct {
 	peers     []*labrpc.ClientEnd // (READ ONLY) RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
-	dead      int32               // set by Kill()
+	dead      atomic.Int32        // set by Kill()
 
 	// All State
 	LocalLog         []Log
@@ -149,12 +149,19 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	})
 	// Leader should start synchronize log here
-	li, lt := rf.getPrevLogIndexAndTerm()
+
 	for i := range rf.peers {
 		go func(server int) {
 			RecoverAndLog()
 			reply := AppendEntryReply{}
-			ok := rf.sendAppendEntry(server, &AppendEntryArgs{
+			nextIndex, ok := rf.NextIndex.Load(server)
+			if !ok {
+				debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
+				return
+			}
+
+			li, lt := rf.getPrevLogIndexAndTerm(nextIndex.(int))
+			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
 				Term:         int(rf.CurrentTerm.Load()),
 				PrevLogIndex: li,
 				PrevLogTerm:  lt,
@@ -169,21 +176,41 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
 				return
 			}
-			if reply.Success {
-				v, ok := rf.LogAck.Load(li + 1)
-				if !ok {
-					rf.LogAck.Store(li+1, 1)
-				} else {
-					rf.LogAck.Store(li+1, v.(int)+1)
-				}
-
-				if v.(int)+1 == (len(rf.peers)+1)/2 {
-					// TODO: leader can commit here
-				}
-			}
+			rf.processAppendEntryReply(reply, li, server)
 		}(i)
 	}
 	return index, term, rf.isLeader()
+}
+
+func (rf *Raft) processAppendEntryReply(reply AppendEntryReply, li int, server int) bool {
+	if reply.Term > int(rf.CurrentTerm.Load()) {
+		rf.becomeFollower()
+		return true
+	}
+	if reply.Success {
+		v, ok := rf.LogAck.Load(li + 1)
+		if !ok {
+			rf.LogAck.Store(li+1, 1)
+		} else {
+			rf.LogAck.Store(li+1, v.(int)+1)
+		}
+
+		matchIndex, ok := rf.MatchIndex.Load(server)
+		if !ok {
+			return false
+		}
+		rf.MatchIndex.Store(server, matchIndex.(int)+1)
+		nextIndex, ok := rf.NextIndex.Load(server)
+		if !ok {
+			return false
+		}
+		rf.NextIndex.Store(server, nextIndex.(int)+1)
+		if v.(int)+1 == (len(rf.peers)+1)/2 {
+			// TODO: leader can commit here
+			rf.CommitIndex.Add(1)
+		}
+	}
+	return true
 }
 
 // Kill
@@ -197,12 +224,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // confusing debug output. any goroutine with a long-running loop
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
-	atomic.StoreInt32(&rf.dead, 1)
+	rf.dead.Store(1)
 	// Your code here, if desired.
 }
 
 func (rf *Raft) killed() bool {
-	z := atomic.LoadInt32(&rf.dead)
+	z := rf.dead.Load()
 	return z == 1
 }
 
@@ -289,6 +316,22 @@ func (rf *Raft) heartBeat() {
 	}
 }
 
+// Timer: put committed log into applyChannel
+func (rf *Raft) committedLogTimer() {
+	for rf.dead.Load() != 1 {
+		rf.mu.Lock()
+		applyingLogs := rf.LocalLog[rf.LastAppliedIndex.Load():rf.CommitIndex.Load()]
+		rf.mu.Unlock()
+		lastAppliedIndex := rf.LastAppliedIndex.Load()
+		for i, applyingLog := range applyingLogs {
+			rf.applyChan <- ApplyMsg{
+				Command:      applyingLog.Command,
+				CommandIndex: int(lastAppliedIndex) + i,
+			}
+		}
+	}
+}
+
 // -------- RPC Invoke -----------
 
 // The labrpc package simulates a lossy network, in which servers
@@ -325,21 +368,54 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Base.ToNodeID = arg.Base.FromNodeID
 	reply.Base.FromNodeID = rf.me
-	reply.Term = int32(max(int(rf.CurrentTerm.Load()), arg.Term))
+	reply.Term = maxInt32(rf.CurrentTerm.Load(), arg.Term)
 
-	// already vote for current term
-	if arg.Term < int(rf.CurrentTerm.Load()) {
+	// case1: The Request Vote is sent by outdated candidate or the message is delayed in the network
+	if arg.Term < (rf.CurrentTerm.Load()) {
 		reply.VoteGranted = false
 		return
+	} else if arg.Term == (rf.CurrentTerm.Load()) {
+		// case2: check if the node voted for someone or the coming candidate
+		if rf.voteFor.Load() != -1 && int(rf.voteFor.Load()) != arg.Base.FromNodeID {
+			reply.VoteGranted = false
+			return
+		}
+		if rf.voteFor.Load() == -1 || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
+			reply.VoteGranted = true
+			rf.voteFor.Store(int32(arg.Base.FromNodeID))
+			return
+		}
+	} else {
+		// case3: higher term candidate want to compete for leadership
+		rf.voteFor.Store(-1)
+		rf.CurrentTerm.Store(arg.Term)
+		reply.Term = rf.CurrentTerm.Load()
+		defer rf.becomeFollower()
+		myLastIndex, myLastTerm := rf.getLastLogIndexAndTerm()
+		// case3.1: the candidate's log is not up-to-date
+		if myLastTerm > arg.LastLogTerm {
+			reply.VoteGranted = false
+			return
+		}
+		if myLastTerm == arg.LastLogTerm {
+			// case3.2: the candidate log is not up-to-date
+			if myLastIndex > arg.LastLogIndex {
+				reply.VoteGranted = false
+				return
+			} else {
+				// case3.3: the candidate log is up-to-date
+				rf.voteFor.Store(int32(arg.Base.FromNodeID))
+				reply.VoteGranted = true
+				return
+			}
+		}
+		// case4: the candidate log is up-to-date
+		if myLastTerm < arg.LastLogTerm {
+			rf.voteFor.Store(int32(arg.Base.FromNodeID))
+			reply.VoteGranted = true
+			return
+		}
 	}
-	if canVoteForCandidate(rf.voteFor.Load(), int32(arg.Term), rf.CurrentTerm.Load(), arg.Base.FromNodeID) {
-		// vote for candidate in args
-		rf.voteFor.Store(int32(arg.Base.FromNodeID))
-		rf.CurrentTerm.Store(int32(max(int(rf.CurrentTerm.Load()), arg.Term)))
-		reply.VoteGranted = int(rf.CurrentTerm.Load()) == arg.Term
-		return
-	}
-	reply.VoteGranted = false
 }
 
 func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
@@ -351,8 +427,28 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 	// become follower
+	rf.becomeFollower()
+	rf.CurrentTerm.Store(int32(arg.Term))
 	rf.LeaderID.Swap(int32(from))
+	rf.voteFor.Store(int32(from))
 	rf.IsLeaderAlive.Store(true)
+
+	rf.mu.Lock()
+	// no log in prevLogIndex or prevLogIndex has different term
+	if len(rf.LocalLog) <= arg.PrevLogIndex || int(rf.LocalLog[arg.PrevLogIndex].Term) != arg.PrevLogTerm {
+		reply.Success = false
+		reply.Term = int(rf.CurrentTerm.Load())
+
+		return
+	}
+
+	// store replicated log into local logs
+	if isLogConflict(rf.LocalLog[arg.PrevLogIndex:], arg.Entries) {
+		rf.LocalLog = append(rf.LocalLog[:arg.PrevLogIndex+1], arg.Entries...)
+	}
+	if arg.LeaderCommit > rf.CommitIndex.Load() {
+		rf.CommitIndex.Store(minInt32(arg.LeaderCommit, int32(len(rf.LocalLog)-1)))
+	}
 	reply.Success = true
 }
 
@@ -383,23 +479,35 @@ func (rf *Raft) isLeader() bool {
 	return int(rf.LeaderID.Load()) == rf.me
 }
 
-func (rf *Raft) getPrevLogIndexAndTerm() (int, int) {
+func (rf *Raft) getPrevLogIndexAndTerm(nextIndex int) (int, int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if nextIndex < 1 {
+		return 0, 0
+	}
+	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term)
+}
+
+func (rf *Raft) getLastLogIndexAndTerm() (int, int) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	l := len(rf.LocalLog)
-	if l == 1 {
+	if l == 0 {
 		return 0, 0
 	}
-	return l - 2, int(rf.LocalLog[l-2].Term)
+	return l - 1, int(rf.LocalLog[l-1].Term)
 }
 
 func (rf *Raft) startElection() {
 	rf.becomeCandidate()
 
 	// send RequestVoteRPC to all peers
+	lastLogIndex, lastLogTerm := rf.getLastLogIndexAndTerm()
 	for i := range rf.peers {
 		req := &RequestVoteArgs{
-			Term: int(rf.CurrentTerm.Load()),
+			Term:         rf.CurrentTerm.Load(),
+			LastLogTerm:  lastLogTerm,
+			LastLogIndex: lastLogIndex,
 			Base: Base{
 				FromNodeID: rf.me,
 				ToNodeID:   i,

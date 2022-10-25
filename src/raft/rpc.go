@@ -40,7 +40,7 @@ type ApplyMsg struct {
 // RequestVoteArgs Candidate start a election period
 type RequestVoteArgs struct {
 	LastLogIndex, LastLogTerm int
-	Term                      int
+	Term                      int32
 	Base                      Base
 }
 
