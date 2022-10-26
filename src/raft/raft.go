@@ -162,13 +162,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 				return
 			}
 
-			li, lt := rf.getPrevLogIndexAndTerm(nextIndex.(int))
+			li, lt, logEntries := rf.buildAppendEntry(nextIndex.(int))
 			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
 				Term:         int(rf.CurrentTerm.Load()),
 				PrevLogIndex: li,
 				PrevLogTerm:  lt,
 				LeaderCommit: rf.CommitIndex.Load(),
-				Entries:      rf.LocalLog,
+				Entries:      logEntries,
 				Base: Base{
 					FromNodeID: rf.me,
 					ToNodeID:   server,
@@ -185,10 +185,24 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 }
 
 func (rf *Raft) processAppendEntryReply(reply AppendEntryReply, li int, server int) bool {
+	// follower's term is larger than leader's term, which means that the leader is out of date
 	if reply.Term > int(rf.CurrentTerm.Load()) {
 		rf.becomeFollower()
 		return true
 	}
+
+	// follower's log is inconsistent with leader
+	if !reply.Success {
+		nextIndex, ok := rf.NextIndex.Load(server)
+		if !ok {
+			debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
+			return false
+		}
+		rf.NextIndex.Store(server, nextIndex.(int)-1)
+		return true
+	}
+
+	// leader's log is replicated to the follower
 	if reply.Success {
 		v, ok := rf.LogAck.Load(li + 1)
 		if !ok {
@@ -199,17 +213,19 @@ func (rf *Raft) processAppendEntryReply(reply AppendEntryReply, li int, server i
 
 		matchIndex, ok := rf.MatchIndex.Load(server)
 		if !ok {
+			debug.Debug(debug.DError, "S%d GetMatchIndex in Log failed, to S%d \n", rf.me, server)
 			return false
 		}
 		rf.MatchIndex.Store(server, matchIndex.(int)+1)
 		nextIndex, ok := rf.NextIndex.Load(server)
 		if !ok {
+			debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
 			return false
 		}
 		rf.NextIndex.Store(server, nextIndex.(int)+1)
 		if v.(int)+1 == (len(rf.peers)+1)/2 {
-			// TODO: leader can commit here
 			rf.CommitIndex.Add(1)
+			rf.flushLocalLog()
 		}
 	}
 	return true
@@ -322,17 +338,21 @@ func (rf *Raft) heartBeat() {
 // Timer: put committed log into applyChannel
 func (rf *Raft) committedLogTimer() {
 	for rf.dead.Load() != 1 {
-		rf.mu.Lock()
-		applyingLogs := rf.LocalLog[rf.LastAppliedIndex.Load():rf.CommitIndex.Load()]
-		rf.mu.Unlock()
-		lastAppliedIndex := rf.LastAppliedIndex.Load()
-		for i, applyingLog := range applyingLogs {
-			rf.applyChan <- ApplyMsg{
-				Command:      applyingLog.Command,
-				CommandIndex: int(lastAppliedIndex) + i,
-			}
-		}
+		rf.flushLocalLog()
 		time.Sleep(ApplyTimeout)
+	}
+}
+
+func (rf *Raft) flushLocalLog() {
+	rf.mu.Lock()
+	applyingLogs := rf.LocalLog[rf.LastAppliedIndex.Load():rf.CommitIndex.Load()]
+	rf.mu.Unlock()
+	lastAppliedIndex := rf.LastAppliedIndex.Load()
+	for i, applyingLog := range applyingLogs {
+		rf.applyChan <- ApplyMsg{
+			Command:      applyingLog.Command,
+			CommandIndex: int(lastAppliedIndex) + i,
+		}
 	}
 }
 
@@ -493,13 +513,13 @@ func (rf *Raft) isLeader() bool {
 	return int(rf.LeaderID.Load()) == rf.me
 }
 
-func (rf *Raft) getPrevLogIndexAndTerm(nextIndex int) (int, int) {
+func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	if nextIndex < 1 {
-		return 0, 0
+		return 0, 0, []Log{}
 	}
-	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term)
+	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term), rf.LocalLog[nextIndex:]
 }
 
 func (rf *Raft) getLastLogIndexAndTerm() (int, int) {
