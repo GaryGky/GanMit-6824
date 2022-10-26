@@ -461,7 +461,17 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 func (rf *Raft) becomeLeader() {
 	debug.Debug(debug.DLeader, "S%d becomes Leader in Term %d \n", rf.me, rf.CurrentTerm.Load())
 	rf.LeaderID.Store(int32(rf.me))
+	rf.initNextAndMatch()
 	go rf.heartBeat()
+}
+
+func (rf *Raft) initNextAndMatch() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for server := range rf.peers {
+		rf.NextIndex.Store(server, len(rf.LocalLog))
+		rf.MatchIndex.Store(server, 0)
+	}
 }
 
 func (rf *Raft) becomeCandidate() {
