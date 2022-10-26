@@ -3,6 +3,7 @@ package raft
 import (
 	"math/rand"
 	rDebug "runtime/debug"
+	"sync"
 	"time"
 
 	"6.824/debug"
@@ -43,12 +44,12 @@ func RecoverAndLog() {
 	}
 }
 
-func isLogConflict(afterLog, replicateLogs []Log) bool {
-	if len(afterLog) > len(replicateLogs) {
+func isLogConflict(localLogs, remoteLogs []Log) bool {
+	if len(localLogs) > len(remoteLogs) {
 		return false
 	}
-	for i := 0; i < len(replicateLogs); i++ {
-		if afterLog[i].Term != replicateLogs[i].Term {
+	for i := 0; i < len(remoteLogs); i++ {
+		if localLogs[i].Term != remoteLogs[i].Term {
 			return false
 		}
 	}
@@ -59,6 +60,9 @@ func randomTime() time.Duration {
 	return time.Duration(rand.Intn(10)) * time.Millisecond
 }
 
-func canVoteForCandidate(voteFor int32, reqTerm, currentTerm int32, fromNodeID int) bool {
-	return reqTerm > currentTerm || voteFor == -1 || fromNodeID == int(voteFor)
+func clearSyncMap(p *sync.Map) {
+	p.Range(func(key interface{}, value interface{}) bool {
+		p.Delete(key)
+		return true
+	})
 }

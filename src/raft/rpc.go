@@ -70,7 +70,7 @@ func (r *RequestVoteArgs) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
 func (r *RequestVoteArgs) PrintDebugInfo() {
-	debug.Debug(debug.DClient, "S%d -> S%d, %s RequestVoteArgs:{Term: %d, LastLogIndex: %d, LastLogTerm: %d} \n",
+	debug.Debug(debug.DClient, "S%d -> S%d, RequestVoteArgs:{Term: %d, LastLogIndex: %d, LastLogTerm: %d} \n",
 		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.LastLogIndex, r.LastLogTerm)
 }
 
@@ -78,15 +78,15 @@ func (r *RequestVoteReply) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
 func (r *RequestVoteReply) PrintDebugInfo() {
-	debug.Debug(debug.DClient, "S%d -> S%d, %s RequestVoteReply:{Term: %d, Granted: %v} %v \n",
-		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.VoteGranted)
+	debug.Debug(debug.DClient, "S%d <- S%d, RequestVoteReply:{Term: %d, Granted: %v} \n",
+		r.Base.ToNodeID, r.Base.FromNodeID, r.Term, r.VoteGranted)
 }
 
 func (r *AppendEntryArgs) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
 func (r *AppendEntryArgs) PrintDebugInfo() {
-	debug.Debug(debug.DClient, "S%d -> S%d, %s AppendEntryArgs:{Term: %d, PrevLog: {Index: %d, Term: %d}, LeaderCommit: %d, Entries: %v} \n",
+	debug.Debug(debug.DClient, "S%d -> S%d, AppendEntryArgs:{Term: %d, PrevLog: {Index: %d, Term: %d}, LeaderCommit: %d, Entries: %v} \n",
 		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.PrevLogIndex, r.PrevLogTerm, r.LeaderCommit, r.Entries)
 }
 
@@ -94,7 +94,7 @@ func (r *AppendEntryReply) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
 func (r *AppendEntryReply) PrintDebugInfo() {
-	debug.Debug(debug.DClient, "S%d -> S%d, %s AppendEntryReply: {Term: %d, Success: %v} \n", r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.Success)
+	debug.Debug(debug.DClient, "S%d <- S%d, AppendEntryReply: {Term: %d, Success: %v} \n", r.Base.ToNodeID, r.Base.FromNodeID, r.Term, r.Success)
 }
 
 func rpcCall(endpoint *labrpc.ClientEnd, method string, args BaseMessage, reply BaseMessage) bool {

@@ -9,4 +9,4 @@ clean:
   rm -f mr-*
 
 pretty-log:
-   ./script/dslog.py ./raft/debug.log -j ERRO,CLNT,LEAD
+   ./script/dslog.py ./raft/debug.log -j ERRO,CLNT,LEAD,TEST,LOG1 -c 3
