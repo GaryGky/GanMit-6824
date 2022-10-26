@@ -136,15 +136,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 
 }
 
-// Start
-// the service using Raft (e.g. a k/v server) wants to start
-// agreement on the next command to be appended to Raft's log. if this
-// server isn't the leader, returns false. otherwise, start the
-// agreement and return immediately. there is no guarantee that this
-// command will ever be committed to the Raft log, since the leader
-// may fail or lose an election. even if the Raft instance has been killed,
-// this function should return gracefully.
-
 // Start the first return value is the index that the command will appear at
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
@@ -220,7 +211,7 @@ func (rf *Raft) processAppendEntryReply(reply AppendEntryReply, lastIndex int, s
 	if !ok {
 		v = 0
 	}
-	rf.LogAck.Store(lastIndex+1, 1)
+	rf.LogAck.Store(lastIndex+1, v.(int)+1)
 	if v.(int)+1 == (len(rf.peers)+1)/2 {
 		rf.CommitIndex.Add(1)
 		rf.flushLocalLog()
@@ -380,10 +371,13 @@ func (rf *Raft) flushLocalLog() {
 	}
 
 	for i := rf.LastAppliedIndex.Load() + 1; i <= rf.CommitIndex.Load(); i++ {
-		rf.applyChan <- ApplyMsg{
-			Command:      rf.LocalLog[i].Command,
-			CommandIndex: int(i),
-		}
+		go func(index int) {
+			RecoverAndLog()
+			rf.applyChan <- ApplyMsg{
+				Command:      rf.LocalLog[index].Command,
+				CommandIndex: index,
+			}
+		}(int(i))
 	}
 }
 
@@ -496,8 +490,9 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// directly reply success to heartbeat
-	if len(arg.Entries) == 0 {
+	// directly reply success to heartbeat or local sent message
+	if len(arg.Entries) == 0 || rf.me == arg.Base.FromNodeID {
+		rf.CommitIndex.Store(minInt32(arg.LeaderCommit, int32(len(rf.LocalLog)-1)))
 		reply.Success = true
 		return
 	}
