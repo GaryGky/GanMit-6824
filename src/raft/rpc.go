@@ -63,7 +63,9 @@ type AppendEntryArgs struct {
 type AppendEntryReply struct {
 	Term    int
 	Success bool
-	Base    Base
+	// when follower lost some logs, set this field to notify leader to reset next index
+	PrevLogIndex int
+	Base         Base
 }
 
 func (r *RequestVoteArgs) GetAllCaseByUserID() (int, int) {
