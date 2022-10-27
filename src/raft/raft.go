@@ -1,21 +1,5 @@
 package raft
 
-//
-// this is an outline of the API that raft must expose to
-// the service (or tester). see comments below for
-// each of these functions for more details.
-//
-// rf = Make(...)
-//   create a new Raft server.
-// rf.Start(command interface{}) (index, term, isleader)
-//   start agreement on a new log entry
-// rf.GetState() (term, isLeader)
-//   ask a Raft for its current term, and whether it thinks it is leader
-// ApplyMsg
-//   each time a new entry is committed to the log, each Raft peer
-//   should send an ApplyMsg to the service (or tester)
-//   in the same server.
-
 import (
 	"fmt"
 	//	"bytes"
@@ -50,6 +34,11 @@ type Log struct {
 	Command interface{}
 }
 
+type AlreadyApplyLog struct {
+	index int
+	term  int32
+}
+
 // Raft object implementing a single Raft peer.
 type Raft struct {
 	mu        sync.Mutex          // PhaseLock to protect shared access to this peer's state
@@ -66,6 +55,7 @@ type Raft struct {
 	LastAppliedIndex atomic.Int32
 	applyChan        chan ApplyMsg
 	state            atomic.Value
+	alreadyApply     sync.Map
 
 	// Follower States
 	IsLeaderAlive atomic.Bool // Follower to check whether it should start a new election
@@ -142,7 +132,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // term. the third return value is true if this server believes it is
 // the leader.
 
-func (rf *Raft) preProcess(command interface{}) (int, int, bool) {
+func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 	debug.Debug(debug.DClient, "S%d Receive %v from client, \n", rf.me, command)
 	index := -1
 	term := -1
@@ -153,6 +143,9 @@ func (rf *Raft) preProcess(command interface{}) (int, int, bool) {
 	}
 
 	// check if the log already processed
+	if val, ok := rf.alreadyApply.Load(command); ok {
+		return val.(AlreadyApplyLog).index, int(val.(AlreadyApplyLog).term), true
+	}
 
 	// leader appends the log locally
 	rf.mu.Lock()
@@ -165,7 +158,7 @@ func (rf *Raft) preProcess(command interface{}) (int, int, bool) {
 	return 0, 0, true
 }
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index, term, isLeader := rf.preProcess(command)
+	index, term, isLeader := rf.PreProcessLog(command)
 	if !isLeader {
 		return index, term, isLeader
 	}
@@ -308,6 +301,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.LogAck = sync.Map{}
 	rf.state = atomic.Value{}
 	rf.state.Store(Follower)
+	rf.alreadyApply = sync.Map{}
 
 	// append a nop log into local log
 	rf.mu.Lock()
@@ -394,11 +388,16 @@ func (rf *Raft) flushLocalLog() {
 			defer rf.mu.Unlock()
 
 			rf.applyChan <- ApplyMsg{
+				CommandValid: true,
 				Command:      rf.LocalLog[index].Command,
 				CommandIndex: index,
 			}
+			rf.LastAppliedIndex.Add(1)
+			rf.alreadyApply.Store(rf.LocalLog[index].Command, AlreadyApplyLog{
+				index: index,
+				term:  rf.LocalLog[index].Term,
+			})
 			debug.Debug(debug.DLeader, "S%d apply log: (command:%v, index: %d) finished! \n", rf.me, rf.LocalLog[index].Command, index)
-
 		}(int(i))
 	}
 }
