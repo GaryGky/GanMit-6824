@@ -65,7 +65,6 @@ type Raft struct {
 	// Leader States
 	NextIndex  sync.Map
 	MatchIndex sync.Map
-	LogAck     sync.Map
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
@@ -193,7 +192,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.LastAppliedIndex.Store(0)
 	rf.NextIndex = sync.Map{}
 	rf.MatchIndex = sync.Map{}
-	rf.LogAck = sync.Map{}
 	rf.state = atomic.Value{}
 	rf.state.Store(Follower)
 	rf.alreadyApply = sync.Map{}
@@ -372,7 +370,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	missing, lastMatchIndex := rf.isLogMissing(arg.PrevLogIndex, arg.Entries)
 	if missing {
 		reply.Success = false
-		reply.PrevLogIndex = lastMatchIndex
+		reply.LastMatchIndex = lastMatchIndex
 		return
 	}
 
@@ -510,49 +508,34 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 	return 0, 0, true
 }
 
-func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, lastIndex int, server int) {
+func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 	// follower's term is larger than leader's term, which means that the leader is out of date
 	if reply.Term > int(rf.CurrentTerm.Load()) {
 		rf.becomeFollower()
 		return
 	}
 
-	// follower's log is inconsistent with leader
-	if !reply.Success {
-		nextIndex, ok := rf.NextIndex.Load(server)
-		if !ok {
-			debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
-			return
+	rf.MatchIndex.Store(server, reply.LastMatchIndex)
+	rf.NextIndex.Store(server, reply.LastMatchIndex+1)
+	debug.Debug(debug.DLog, "S%d increase S%d nextIndex:%d, matchIndex to: %d \n", rf.me, server, reply.LastMatchIndex+1, reply.LastMatchIndex)
+
+	// check if leader's commitIndex can be increased
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	for i := len(rf.LocalLog) - 1; i > int(rf.CommitIndex.Load()); i-- {
+		cnt := 0
+		rf.MatchIndex.Range(func(key, value any) bool {
+			if value.(int) > i {
+				cnt++
+			}
+			return true
+		})
+		if cnt >= (len(rf.peers)+1)/2 && rf.LocalLog[i].Term == rf.CurrentTerm.Load() {
+			rf.CommitIndex.Store(int32(i))
+			break
 		}
-		rf.NextIndex.Store(server, nextIndex.(int)-1)
-		return
 	}
 
-	// leader's log is replicated to the follower
-	v, ok := rf.LogAck.Load(lastIndex + 1)
-	if !ok {
-		v = 0
-	}
-	rf.LogAck.Store(lastIndex+1, v.(int)+1)
-	if v.(int)+1 == (len(rf.peers)+1)/2 {
-		rf.CommitIndex.Add(1)
-		rf.flushLocalLog()
-	}
-
-	matchIndex, ok := rf.MatchIndex.Load(server)
-	if !ok {
-		debug.Debug(debug.DError, "S%d GetMatchIndex in Log failed, to S%d \n", rf.me, server)
-		return
-	}
-	rf.MatchIndex.Store(server, lastIndex+1)
-
-	nextIndex, ok := rf.NextIndex.Load(server)
-	if !ok {
-		debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
-		return
-	}
-	rf.NextIndex.Store(server, nextIndex.(int)+1)
-	debug.Debug(debug.DLog, "S%d increase S%d nextIndex:%d, matchIndex to: %d \n", rf.me, server, nextIndex.(int)+1, matchIndex.(int)+1)
 }
 
 func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int, server int) {
@@ -563,7 +546,7 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 	}
 
 	// the log entry is missing and move back the next index pointer
-	if reply.PrevLogIndex < prevLogIndex {
+	if reply.LastMatchIndex < prevLogIndex {
 		rf.NextIndex.Store(server, prevLogIndex+1)
 	}
 	return
@@ -598,11 +581,17 @@ func (rf *Raft) SyncLogs() {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
 				return
 			}
+			// there might be some conflict or missing log in the follower
 			if !reply.Success {
 				rf.processFailAppendReply(reply, prevLogIndex, server)
 				return
 			}
-			rf.processSuccessAppendReply(reply, prevLogIndex, server)
+
+			// ignore the heartbeat AppendEntry
+			if len(logEntries) == 0 {
+				return
+			}
+			rf.processSuccessAppendReply(reply, server)
 		}(i)
 	}
 }
