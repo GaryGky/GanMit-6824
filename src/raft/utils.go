@@ -55,11 +55,11 @@ func clearSyncMap(p *sync.Map) {
 	})
 }
 
-func (rf *Raft) isLogMissing(prevLogIndex int, remoteLogs []Log) (bool, int) {
+func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int) (bool, int) {
 	if prevLogIndex >= len(rf.LocalLog) {
 		return true, len(rf.LocalLog) - 1
 	}
-	if rf.LocalLog[prevLogIndex].Term != remoteLogs[prevLogIndex].Term {
+	if rf.LocalLog[prevLogIndex].Term != int32(prevLogTerm) {
 		return true, prevLogIndex - 1
 	}
 	return false, prevLogIndex
@@ -76,31 +76,4 @@ func (rf *Raft) isLogConflict(prevLogIndex int, remoteLogs []Log) (bool, int) {
 		}
 	}
 	return false, prevLogIndex
-}
-
-func (rf *Raft) flushLocalLog() {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if len(rf.LocalLog) == 0 {
-		return
-	}
-	for i := rf.LastAppliedIndex.Load() + 1; i <= rf.CommitIndex.Load(); i++ {
-		go func(index int) {
-			RecoverAndLog()
-			rf.mu.Lock()
-			defer rf.mu.Unlock()
-
-			rf.applyChan <- ApplyMsg{
-				CommandValid: true,
-				Command:      rf.LocalLog[index].Command,
-				CommandIndex: index,
-			}
-			rf.LastAppliedIndex.Add(1)
-			rf.alreadyApply.Store(rf.LocalLog[index].Command, AlreadyApplyLog{
-				index: index,
-				term:  rf.LocalLog[index].Term,
-			})
-			debug.Debug(debug.DLeader, "S%d apply log: (command:%v, index: %d) finished! \n", rf.me, rf.LocalLog[index].Command, index)
-		}(int(i))
-	}
 }

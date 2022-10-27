@@ -13,9 +13,9 @@ import (
 
 var (
 	// ElectionTimeout Within the range if there's no heartbeat from leader, Raft will start an election
-	ElectionTimeout = time.Millisecond * 500
+	ElectionTimeout = time.Millisecond * 900
 	// HeartBeatTimeout within the range leader should send a heartbeat to all server
-	HeartBeatTimeout = time.Millisecond * 150
+	HeartBeatTimeout = time.Millisecond * 300
 	// ApplyTimeout within the range, every node should check local logs from (lastApplied, commitIndex]
 	ApplyTimeout = time.Millisecond * 500
 )
@@ -354,20 +354,15 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// directly reply success to heartbeat or local sent message
-	if len(arg.Entries) == 0 || rf.me == arg.Base.FromNodeID {
-		rf.CommitIndex.Store(minInt32(arg.LeaderCommit, int32(len(rf.LocalLog)-1)))
+	// directly reply success local sent message
+	if rf.me == arg.Base.FromNodeID {
 		reply.Success = true
+		reply.LastMatchIndex = len(rf.LocalLog) - 1
 		return
 	}
 
-	// no log in prevLogIndex or prevLogIndex has different term
-	if len(rf.LocalLog) <= arg.PrevLogIndex || int(rf.LocalLog[arg.PrevLogIndex].Term) != arg.PrevLogTerm {
-		reply.Success = false
-		return
-	}
-
-	missing, lastMatchIndex := rf.isLogMissing(arg.PrevLogIndex, arg.Entries)
+	// check if there's no log in prevLogIndex or prevLogIndex has different term
+	missing, lastMatchIndex := rf.isLogMissing(arg.PrevLogIndex, arg.PrevLogTerm)
 	if missing {
 		reply.Success = false
 		reply.LastMatchIndex = lastMatchIndex
@@ -382,11 +377,13 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	// append leader's logs into follower's logs
 	rf.LocalLog = append(rf.LocalLog, arg.Entries...)
 
-	debug.Debug(debug.DLog, "S%d append %v into local log \n", rf.me, arg.Entries)
-
+	// set node's commitIndex
 	if arg.LeaderCommit > rf.CommitIndex.Load() {
 		rf.CommitIndex.Store(minInt32(arg.LeaderCommit, int32(len(rf.LocalLog)-1)))
 	}
+	debug.Debug(debug.DLog, "S%d append %v into local log \n", rf.me, arg.Entries)
+
+	reply.LastMatchIndex = len(rf.LocalLog) - 1
 	reply.Success = true
 }
 
@@ -437,9 +434,6 @@ func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
 	defer rf.mu.Unlock()
 	if nextIndex < 1 {
 		return 0, 0, []Log{}
-	}
-	if len(rf.LocalLog)-1 >= nextIndex {
-		nextIndex = len(rf.LocalLog) - 1
 	}
 	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term), rf.LocalLog[nextIndex:]
 }
@@ -525,7 +519,7 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 	for i := len(rf.LocalLog) - 1; i > int(rf.CommitIndex.Load()); i-- {
 		cnt := 0
 		rf.MatchIndex.Range(func(key, value any) bool {
-			if value.(int) > i {
+			if value.(int) >= i {
 				cnt++
 			}
 			return true
@@ -541,13 +535,15 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int, server int) {
 	// current node is the outdated leader
 	if int32(reply.Term) > rf.CurrentTerm.Load() {
+		rf.CurrentTerm.Store(int32(reply.Term))
 		rf.becomeFollower()
 		return
 	}
 
 	// the log entry is missing and move back the next index pointer
 	if reply.LastMatchIndex < prevLogIndex {
-		rf.NextIndex.Store(server, prevLogIndex+1)
+		rf.NextIndex.Store(server, reply.LastMatchIndex+1)
+		debug.Debug(debug.DLeader, "S%d set nextIndex: %d for S%d \n", rf.me, reply.LastMatchIndex+1, server)
 	}
 	return
 }
@@ -593,5 +589,26 @@ func (rf *Raft) SyncLogs() {
 			}
 			rf.processSuccessAppendReply(reply, server)
 		}(i)
+	}
+}
+
+func (rf *Raft) flushLocalLog() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if len(rf.LocalLog) == 0 {
+		return
+	}
+	for i := int(rf.LastAppliedIndex.Load()) + 1; i <= int(rf.CommitIndex.Load()); i++ {
+		rf.applyChan <- ApplyMsg{
+			CommandValid: true,
+			Command:      rf.LocalLog[i].Command,
+			CommandIndex: i,
+		}
+		rf.LastAppliedIndex.Add(1)
+		rf.alreadyApply.Store(rf.LocalLog[i].Command, AlreadyApplyLog{
+			index: i,
+			term:  rf.LocalLog[i].Term,
+		})
+		debug.Debug(debug.DLeader, "S%d apply log: (command:%v, i: %d) finished! \n", rf.me, rf.LocalLog[i].Command, i)
 	}
 }
