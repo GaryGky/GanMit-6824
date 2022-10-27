@@ -17,6 +17,7 @@ package raft
 //   in the same server.
 
 import (
+	"fmt"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
@@ -140,13 +141,20 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
-func (rf *Raft) Start(command interface{}) (int, int, bool) {
+
+func (rf *Raft) preProcess(command interface{}) (int, int, bool) {
 	debug.Debug(debug.DClient, "S%d Receive %v from client, \n", rf.me, command)
 	index := -1
 	term := -1
+
+	// just discard this message
 	if !rf.isLeader() {
 		return index, term, false
 	}
+
+	// check if the log already processed
+
+	// leader appends the log locally
 	rf.mu.Lock()
 	rf.LocalLog = append(rf.LocalLog, Log{
 		Term:    rf.CurrentTerm.Load(),
@@ -154,6 +162,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	})
 	debug.Debug(debug.DLeader, "S%d, put %v into local log \n", rf.me, command)
 	rf.mu.Unlock()
+	return 0, 0, true
+}
+func (rf *Raft) Start(command interface{}) (int, int, bool) {
+	index, term, isLeader := rf.preProcess(command)
+	if !isLeader {
+		return index, term, isLeader
+	}
 
 	// Leader should start synchronize log here
 	for i := range rf.peers {
@@ -185,7 +200,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			rf.processAppendEntryReply(reply, lastIndex, server)
 		}(i)
 	}
-	return index, term, rf.isLeader()
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return len(rf.LocalLog) - 1, int(rf.CurrentTerm.Load()), rf.isLeader()
 }
 
 func (rf *Raft) processAppendEntryReply(reply AppendEntryReply, lastIndex int, server int) bool {
@@ -271,6 +289,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.persister = persister
 	rf.me = me
 	rf.mu = sync.Mutex{}
+	rf.applyChan = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.VotesFromPeers = atomic.Int32{}
@@ -284,7 +303,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.CommitIndex.Store(0)
 	rf.LastAppliedIndex = atomic.Int32{}
 	rf.LastAppliedIndex.Store(0)
-	rf.applyChan = make(chan ApplyMsg)
 	rf.NextIndex = sync.Map{}
 	rf.MatchIndex = sync.Map{}
 	rf.LogAck = sync.Map{}
@@ -369,14 +387,18 @@ func (rf *Raft) flushLocalLog() {
 	if len(rf.LocalLog) == 0 {
 		return
 	}
-
 	for i := rf.LastAppliedIndex.Load() + 1; i <= rf.CommitIndex.Load(); i++ {
 		go func(index int) {
 			RecoverAndLog()
+			rf.mu.Lock()
+			defer rf.mu.Unlock()
+
 			rf.applyChan <- ApplyMsg{
 				Command:      rf.LocalLog[index].Command,
 				CommandIndex: index,
 			}
+			debug.Debug(debug.DLeader, "S%d apply log: (command:%v, index: %d) finished! \n", rf.me, rf.LocalLog[index].Command, index)
+
 		}(int(i))
 	}
 }
@@ -477,8 +499,12 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = false
 		return
 	}
+
 	// become follower
-	if rf.me != arg.Base.FromNodeID && rf.state.Load().(State) != Follower {
+	if rf.state.Load().(State) != Follower && rf.me != arg.Base.FromNodeID {
+		if rf.me == arg.Base.FromNodeID {
+			panic(fmt.Sprintf("leader: S%d (fromNodeID: %d) change itself to follower! \n", rf.me, arg.Base.FromNodeID))
+		}
 		rf.becomeFollower()
 	}
 	rf.CurrentTerm.Store(int32(arg.Term))
