@@ -54,7 +54,6 @@ type Raft struct {
 	LastAppliedIndex atomic.Int32
 	applyChan        chan ApplyMsg
 	state            atomic.Value
-	alreadyApply     sync.Map
 
 	// Follower States
 	IsLeaderAlive atomic.Bool // Follower to check whether it should start a new election
@@ -63,8 +62,9 @@ type Raft struct {
 	VotesFromPeers atomic.Int32
 
 	// Leader States
-	NextIndex  sync.Map
-	MatchIndex sync.Map
+	NextIndex              sync.Map
+	MatchIndex             sync.Map
+	receivedClientRequests sync.Map
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
@@ -156,20 +156,10 @@ func (rf *Raft) Kill() {
 }
 
 func (rf *Raft) killed() bool {
-	z := rf.dead.Load()
-	return z == 1
+	return rf.dead.Load() == 1
 }
 
-// Make
-// peers: the service or tester wants to create a Raft server. the ports
-// of all the Raft servers (including this one) are in peers[]. this
-// server's port is peers[me]. all the servers' peers[] arrays
-// have the same order.
-// persister: is a place for this server to
-// save its persistent state, and also initially holds the most
-// recent saved state, if any.
-// applyCh: is a channel on which the tester or service expects Raft to send ApplyMsg messages.
-// Make() must return quickly, so it should start goroutines for any long-running work.
+// Make persister: is a place for this server to save its persistent state, and also initially holds the most recent saved state, if any.
 func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
 	rf.peers = peers
@@ -194,7 +184,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.MatchIndex = sync.Map{}
 	rf.state = atomic.Value{}
 	rf.state.Store(Follower)
-	rf.alreadyApply = sync.Map{}
+	rf.receivedClientRequests = sync.Map{}
 
 	// append a nop log into local log
 	rf.mu.Lock()
@@ -230,7 +220,7 @@ func (rf *Raft) ElectionTimer() {
 }
 
 func (rf *Raft) heartBeat() {
-	for rf.isLeader() && rf.state.Load() == Leader {
+	for !rf.killed() && rf.isLeader() && rf.state.Load() == Leader {
 		rf.SyncLogs()
 		time.Sleep(HeartBeatTimeout)
 	}
@@ -238,7 +228,7 @@ func (rf *Raft) heartBeat() {
 
 // Timer: put committed log into applyChannel
 func (rf *Raft) committedLogTimer() {
-	for rf.dead.Load() != 1 {
+	for !rf.killed() {
 		rf.flushLocalLog()
 		time.Sleep(ApplyTimeout)
 	}
@@ -282,52 +272,12 @@ func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Base.FromNodeID = rf.me
 	reply.Term = maxInt32(rf.CurrentTerm.Load(), arg.Term)
 
-	// case1: The Request Vote is sent by outdated candidate or the message is delayed in the network
-	if arg.Term < (rf.CurrentTerm.Load()) {
+	if !isRaftAbleToGrantVote(arg, rf) {
 		reply.VoteGranted = false
 		return
-	} else if arg.Term == (rf.CurrentTerm.Load()) {
-		// case2: check if the node voted for someone or the coming candidate
-		if rf.voteFor.Load() != -1 && int(rf.voteFor.Load()) != arg.Base.FromNodeID {
-			reply.VoteGranted = false
-			return
-		}
-		if rf.voteFor.Load() == -1 || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
-			reply.VoteGranted = true
-			rf.voteFor.Store(int32(arg.Base.FromNodeID))
-			return
-		}
-	} else {
-		// case3: higher term candidate want to compete for leadership
-		rf.voteFor.Store(-1)
-		rf.CurrentTerm.Store(arg.Term)
-		reply.Term = rf.CurrentTerm.Load()
-		defer rf.becomeFollower()
-		myLastIndex, myLastTerm := rf.getLastLogIndexAndTerm()
-		// case3.1: the candidate's log is not up-to-date
-		if myLastTerm > arg.LastLogTerm {
-			reply.VoteGranted = false
-			return
-		}
-		if myLastTerm == arg.LastLogTerm {
-			// case3.2: the candidate log is not up-to-date
-			if myLastIndex > arg.LastLogIndex {
-				reply.VoteGranted = false
-				return
-			} else {
-				// case3.3: the candidate log is up-to-date
-				rf.voteFor.Store(int32(arg.Base.FromNodeID))
-				reply.VoteGranted = true
-				return
-			}
-		}
-		// case4: the candidate log is up-to-date
-		if myLastTerm < arg.LastLogTerm {
-			rf.voteFor.Store(int32(arg.Base.FromNodeID))
-			reply.VoteGranted = true
-			return
-		}
 	}
+	reply.VoteGranted = true
+	rf.voteFor.Store(int32(arg.Base.FromNodeID))
 }
 
 func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
@@ -341,7 +291,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	// become follower
+	// force outdated leader to become follower
 	if rf.state.Load().(State) != Follower && rf.me != arg.Base.FromNodeID {
 		rf.becomeFollower()
 	}
@@ -361,6 +311,8 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
+	freshEntries := rf.removeDuplicateLogsInArg(arg.Entries)
+
 	// check if there's no log in prevLogIndex or prevLogIndex has different term
 	missing, lastMatchIndex := rf.isLogMissing(arg.PrevLogIndex, arg.PrevLogTerm)
 	if missing {
@@ -369,25 +321,41 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	conflict, lastMatchIndex := rf.isLogConflict(arg.PrevLogIndex, arg.Entries)
+	conflict, lastMatchIndex := rf.isLogConflict(arg.PrevLogIndex, freshEntries)
 	if conflict {
 		// delete conflict logs and append leader's logs
 		rf.LocalLog = rf.LocalLog[:lastMatchIndex+1]
 	}
 	// append leader's logs into follower's logs
-	rf.LocalLog = append(rf.LocalLog, arg.Entries...)
+	rf.LocalLog = append(rf.LocalLog, freshEntries...)
 
 	// set node's commitIndex
 	if arg.LeaderCommit > rf.CommitIndex.Load() {
 		rf.CommitIndex.Store(minInt32(arg.LeaderCommit, int32(len(rf.LocalLog)-1)))
 	}
-	debug.Debug(debug.DLog, "S%d append %v into local log \n", rf.me, arg.Entries)
+	debug.Debug(debug.DLog, "S%d append %v into local log \n", rf.me, freshEntries)
 
 	reply.LastMatchIndex = len(rf.LocalLog) - 1
 	reply.Success = true
 }
 
 // -------- utils ---------
+
+func (rf *Raft) removeDuplicateLogsInArg(appendingLogs []Log) []Log {
+	freshEntries := make([]Log, 0)
+	for _, log := range appendingLogs {
+		isDuplicate := false
+		for _, myLog := range rf.LocalLog {
+			if log.Command == myLog.Command && log.Term == myLog.Term {
+				isDuplicate = true
+			}
+		}
+		if !isDuplicate {
+			freshEntries = append(freshEntries, log)
+		}
+	}
+	return freshEntries
+}
 
 func (rf *Raft) becomeLeader() {
 	rf.LeaderID.Store(int32(rf.me))
@@ -477,7 +445,7 @@ func (rf *Raft) startElection() {
 // PreProcessLog Do some checks before apply to command to local log
 // e.g: whether the command has already been processed
 func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
-	debug.Debug(debug.DClient, "S%d Receive %v from client, \n", rf.me, command)
+	debug.Debug(debug.DTrace, "S%d Receive %v from client, \n", rf.me, command)
 	index := -1
 	term := -1
 
@@ -487,7 +455,7 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 	}
 
 	// check if the log already processed
-	if val, ok := rf.alreadyApply.Load(command); ok {
+	if val, ok := rf.receivedClientRequests.Load(command); ok {
 		return val.(AlreadyApplyLog).index, int(val.(AlreadyApplyLog).term), true
 	}
 
@@ -496,6 +464,13 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 	rf.LocalLog = append(rf.LocalLog, Log{
 		Term:    rf.CurrentTerm.Load(),
 		Command: command,
+	})
+
+	// put the log into local log
+	i := len(rf.LocalLog) - 1
+	rf.receivedClientRequests.Store(rf.LocalLog[i].Command, AlreadyApplyLog{
+		index: i,
+		term:  rf.CurrentTerm.Load(),
 	})
 	debug.Debug(debug.DLeader, "S%d, put %v into local log \n", rf.me, command)
 	rf.mu.Unlock()
@@ -524,7 +499,7 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 			}
 			return true
 		})
-		if cnt >= (len(rf.peers)+1)/2 && rf.LocalLog[i].Term == rf.CurrentTerm.Load() {
+		if cnt >= (len(rf.peers)+1)/2 {
 			rf.CommitIndex.Store(int32(i))
 			break
 		}
@@ -605,10 +580,29 @@ func (rf *Raft) flushLocalLog() {
 			CommandIndex: i,
 		}
 		rf.LastAppliedIndex.Add(1)
-		rf.alreadyApply.Store(rf.LocalLog[i].Command, AlreadyApplyLog{
-			index: i,
-			term:  rf.LocalLog[i].Term,
-		})
 		debug.Debug(debug.DLeader, "S%d apply log: (command:%v, i: %d) finished! \n", rf.me, rf.LocalLog[i].Command, i)
 	}
+}
+
+func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int) (bool, int) {
+	if prevLogIndex >= len(rf.LocalLog) {
+		return true, len(rf.LocalLog) - 1
+	}
+	if rf.LocalLog[prevLogIndex].Term != int32(prevLogTerm) {
+		return true, prevLogIndex - 1
+	}
+	return false, prevLogIndex
+}
+
+func (rf *Raft) isLogConflict(prevLogIndex int, remoteLogs []Log) (isConflict bool, lastMatchIndex int) {
+	if prevLogIndex == len(rf.LocalLog)-1 {
+		return false, prevLogIndex
+	}
+	localLogCopy := rf.LocalLog[prevLogIndex+1:]
+	for i := 0; i < minInt(len(remoteLogs), len(localLogCopy)); i++ {
+		if localLogCopy[i].Term != remoteLogs[i].Term {
+			return true, i + prevLogIndex
+		}
+	}
+	return false, prevLogIndex
 }

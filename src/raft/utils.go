@@ -55,25 +55,41 @@ func clearSyncMap(p *sync.Map) {
 	})
 }
 
-func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int) (bool, int) {
-	if prevLogIndex >= len(rf.LocalLog) {
-		return true, len(rf.LocalLog) - 1
-	}
-	if rf.LocalLog[prevLogIndex].Term != int32(prevLogTerm) {
-		return true, prevLogIndex - 1
-	}
-	return false, prevLogIndex
-}
-
-func (rf *Raft) isLogConflict(prevLogIndex int, remoteLogs []Log) (bool, int) {
-	if prevLogIndex == len(rf.LocalLog)-1 {
-		return false, prevLogIndex
-	}
-	localLogCopy := rf.LocalLog[prevLogIndex+1:]
-	for i := 0; i < len(remoteLogs); i++ {
-		if localLogCopy[i].Term != remoteLogs[i].Term {
-			return true, i - 1
+func isRaftAbleToGrantVote(arg *RequestVoteArgs, rf *Raft) bool {
+	// case1: The Request Vote is sent by outdated candidate or the message is delayed in the network
+	if arg.Term < (rf.CurrentTerm.Load()) {
+		return false
+	} else if arg.Term == (rf.CurrentTerm.Load()) {
+		// case2: check if the node voted for someone or the coming candidate
+		if rf.voteFor.Load() != -1 && int(rf.voteFor.Load()) != arg.Base.FromNodeID {
+			return false
+		}
+		if rf.voteFor.Load() == -1 || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
+			return true
+		}
+	} else {
+		// case3: higher term candidate want to compete for leadership
+		rf.voteFor.Store(-1)
+		rf.CurrentTerm.Store(arg.Term)
+		defer rf.becomeFollower()
+		myLastIndex, myLastTerm := rf.getLastLogIndexAndTerm()
+		// case3.1: the candidate's log is not up-to-date
+		if myLastTerm > arg.LastLogTerm {
+			return false
+		}
+		if myLastTerm == arg.LastLogTerm {
+			// case3.2: the candidate log is not up-to-date
+			if myLastIndex > arg.LastLogIndex {
+				return false
+			} else {
+				// case3.3: the candidate log is up-to-date
+				return true
+			}
+		}
+		// case4: the candidate log is up-to-date
+		if myLastTerm < arg.LastLogTerm {
+			return true
 		}
 	}
-	return false, prevLogIndex
+	return true
 }
