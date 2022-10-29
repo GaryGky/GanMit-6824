@@ -314,10 +314,9 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	freshEntries := rf.removeDuplicateLogsInArg(arg.Entries)
 
 	// check if there's no log in prevLogIndex or prevLogIndex has different term
-	missing, lastMatchIndex := rf.isLogMissing(arg.PrevLogIndex, arg.PrevLogTerm)
+	// notice: this will set reply field
+	missing := rf.isLogMissing(arg.PrevLogIndex, arg.PrevLogTerm, reply)
 	if missing {
-		reply.Success = false
-		reply.LastMatchIndex = lastMatchIndex
 		return
 	}
 
@@ -508,6 +507,24 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 }
 
 func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int, server int) {
+	computeNextIndex := func(reply AppendEntryReply, rf *Raft, server int) int {
+		potentialMatchedIndex := reply.LastMatchIndex
+		conflictTerm := reply.Term
+		val, ok := rf.NextIndex.Load(server)
+		if !ok {
+			debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
+			panic(&rf.NextIndex)
+		}
+		currentNextIndex := val.(int) - 1
+		for currentNextIndex > potentialMatchedIndex {
+			if rf.LocalLog[currentNextIndex].Term == int32(conflictTerm) {
+				break
+			}
+			currentNextIndex--
+		}
+		return minInt(potentialMatchedIndex, currentNextIndex+1)
+	}
+
 	// current node is the outdated leader
 	if int32(reply.Term) > rf.CurrentTerm.Load() {
 		rf.CurrentTerm.Store(int32(reply.Term))
@@ -517,9 +534,11 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 
 	// the log entry is missing and move back the next index pointer
 	if reply.LastMatchIndex < prevLogIndex {
-		rf.NextIndex.Store(server, reply.LastMatchIndex+1)
-		debug.Debug(debug.DLeader, "S%d set nextIndex: %d for S%d \n", rf.me, reply.LastMatchIndex+1, server)
+		nextIndex := computeNextIndex(reply, rf, server)
+		rf.NextIndex.Store(server, nextIndex)
+		debug.Debug(debug.DLeader, "S%d set nextIndex: %d for S%d \n", rf.me, nextIndex, server)
 	}
+
 	return
 }
 
@@ -552,6 +571,12 @@ func (rf *Raft) SyncLogs() {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
 				return
 			}
+
+			// break if the Node is not leader
+			if !rf.isLeader() {
+				return
+			}
+
 			// there might be some conflict or missing log in the follower
 			if !reply.Success {
 				rf.processFailAppendReply(reply, prevLogIndex, server)
@@ -580,18 +605,31 @@ func (rf *Raft) flushLocalLog() {
 			CommandIndex: i,
 		}
 		rf.LastAppliedIndex.Add(1)
-		debug.Debug(debug.DLeader, "S%d apply log: (command:%v, i: %d) finished! \n", rf.me, rf.LocalLog[i].Command, i)
+		debug.Debug(debug.DLog2, "S%d apply log: (command:%v, i: %d) finished! \n", rf.me, rf.LocalLog[i].Command, i)
 	}
 }
 
-func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int) (bool, int) {
+func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int, reply *AppendEntryReply) bool {
 	if prevLogIndex >= len(rf.LocalLog) {
-		return true, len(rf.LocalLog) - 1
+		reply.Term = int(rf.LocalLog[len(rf.LocalLog)-1].Term)
+		reply.LastMatchIndex = len(rf.LocalLog) - 1
+		reply.Success = false
+		return true
 	}
-	if rf.LocalLog[prevLogIndex].Term != int32(prevLogTerm) {
-		return true, prevLogIndex - 1
+	if rf.LocalLog[prevLogIndex].Term == int32(prevLogTerm) {
+		return false
 	}
-	return false, prevLogIndex
+	conflictTerm := rf.LocalLog[prevLogIndex].Term
+	potentialMatchedIndex := prevLogIndex
+	for potentialMatchedIndex = prevLogIndex; potentialMatchedIndex > 0; potentialMatchedIndex-- {
+		if rf.LocalLog[potentialMatchedIndex].Term != conflictTerm {
+			break
+		}
+	}
+	reply.Term = int(conflictTerm)
+	reply.LastMatchIndex = potentialMatchedIndex
+	reply.Success = false
+	return true
 }
 
 func (rf *Raft) isLogConflict(prevLogIndex int, remoteLogs []Log) (isConflict bool, lastMatchIndex int) {
