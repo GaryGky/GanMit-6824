@@ -340,6 +340,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 
 // -------- utils ---------
 
+// remove logs which is already in the local logs
 func (rf *Raft) removeDuplicateLogsInArg(appendingLogs []Log) []Log {
 	freshEntries := make([]Log, 0)
 	for _, log := range appendingLogs {
@@ -520,12 +521,12 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 		}
 		currentNextIndex := val.(int) - 1
 		for currentNextIndex > potentialMatchedIndex {
-			if rf.LocalLog[currentNextIndex].Term == int32(conflictTerm) {
+			if rf.LocalLog[currentNextIndex].Term != int32(conflictTerm) {
 				break
 			}
 			currentNextIndex--
 		}
-		return minInt(potentialMatchedIndex, currentNextIndex) + 1
+		return currentNextIndex + 1
 	}
 
 	// current node is the outdated leader
@@ -611,7 +612,7 @@ func (rf *Raft) flushLocalLog() {
 
 func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int, reply *AppendEntryReply) bool {
 	if prevLogIndex >= len(rf.LocalLog) {
-		reply.Term = int(rf.LocalLog[len(rf.LocalLog)-1].Term)
+		reply.Term = prevLogTerm
 		reply.LastMatchIndex = len(rf.LocalLog) - 1
 		reply.Success = false
 		return true
@@ -626,7 +627,7 @@ func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int, reply *AppendEntryRe
 			break
 		}
 	}
-	reply.Term = int(conflictTerm)
+	reply.Term = prevLogTerm
 	reply.LastMatchIndex = potentialMatchedIndex
 	reply.Success = false
 	return true
