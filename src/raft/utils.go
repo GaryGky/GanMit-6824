@@ -1,6 +1,7 @@
 package raft
 
 import (
+	"fmt"
 	"math/rand"
 	rDebug "runtime/debug"
 	"sync"
@@ -92,4 +93,20 @@ func isRaftAbleToGrantVote(arg *RequestVoteArgs, rf *Raft) bool {
 		}
 	}
 	return true
+}
+
+func printDisconnected(server ...int) {
+	servers := ""
+	for _, serverID := range server {
+		servers += fmt.Sprintf("S%d, ", serverID)
+	}
+	debug.Debug(debug.DTest, "%s is disconnected from network \n", servers)
+}
+
+func printConnected(server ...int) {
+	servers := ""
+	for _, serverID := range server {
+		servers += fmt.Sprintf("S%d, ", serverID)
+	}
+	debug.Debug(debug.DTest, "%s is connected from network \n", server)
 }

@@ -508,6 +508,9 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 
 func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int, server int) {
 	computeNextIndex := func(reply AppendEntryReply, rf *Raft, server int) int {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
 		potentialMatchedIndex := reply.LastMatchIndex
 		conflictTerm := reply.Term
 		val, ok := rf.NextIndex.Load(server)
@@ -522,7 +525,7 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 			}
 			currentNextIndex--
 		}
-		return minInt(potentialMatchedIndex, currentNextIndex+1)
+		return minInt(potentialMatchedIndex, currentNextIndex) + 1
 	}
 
 	// current node is the outdated leader
@@ -571,18 +574,15 @@ func (rf *Raft) SyncLogs() {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
 				return
 			}
-
 			// break if the Node is not leader
 			if !rf.isLeader() {
 				return
 			}
-
 			// there might be some conflict or missing log in the follower
 			if !reply.Success {
 				rf.processFailAppendReply(reply, prevLogIndex, server)
 				return
 			}
-
 			// ignore the heartbeat AppendEntry
 			if len(logEntries) == 0 {
 				return
