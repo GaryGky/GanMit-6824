@@ -10,7 +10,7 @@ import (
 
 var (
 	debugStart time.Time
-	debug      = 0
+	debug      = 1
 
 	oFile io.Writer
 )
