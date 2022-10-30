@@ -1,12 +1,15 @@
 package raft
 
 import (
+	"bytes"
 	//	"bytes"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"6.824/debug"
+	"6.824/labgob"
+
 	//	"6.824/labgob"
 	"6.824/labrpc"
 )
@@ -72,38 +75,41 @@ func (rf *Raft) GetState() (int, bool) {
 	return int(rf.CurrentTerm.Load()), int(rf.LeaderID.Load()) == rf.me
 }
 
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
+// save Raft's persistent state to stable storage, where it can later be retrieved after a crash and restart.
 // see paper's Figure 2 for a description of what should be persistent.
 func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.CurrentTerm.Load())
+	e.Encode(rf.voteFor.Load())
+
+	rf.mu.Lock()
+	e.Encode(rf.LocalLog)
+	rf.mu.Unlock()
+
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
+	// bootstrap without any state
+	if data == nil || len(data) < 1 {
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm, votedFor int32
+	var logs []Log
+	if err := d.Decode(&currentTerm); err != nil || d.Decode(&votedFor) != nil || d.Decode(&logs) != nil {
+		debug.Debug(debug.DError, "readPersist Decode error: %v \n")
+	} else {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.CurrentTerm.Store(currentTerm)
+		rf.voteFor.Store(votedFor)
+		rf.LocalLog = logs
+	}
 }
 
 // CondInstallSnapshot
@@ -334,7 +340,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 	debug.Debug(debug.DLog, "S%d append %v into local log \n", rf.me, freshEntries)
 
-	reply.LastMatchIndex = len(rf.LocalLog) - 1
+	reply.LastMatchIndex = lastMatchIndex + len(freshEntries)
 	reply.Success = true
 }
 
@@ -403,7 +409,7 @@ func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
 	if nextIndex < 1 {
 		return 0, 0, []Log{}
 	}
-	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term), rf.LocalLog[nextIndex:]
+	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term), getAppendingLogs(nextIndex, rf)
 }
 
 func (rf *Raft) getLastLogIndexAndTerm() (int, int) {
@@ -501,10 +507,10 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 		})
 		if cnt >= (len(rf.peers)+1)/2 {
 			rf.CommitIndex.Store(int32(i))
+			debug.Debug(debug.DLeader, "S%d increase commitIndex to %d \n", rf.me, i)
 			break
 		}
 	}
-
 }
 
 func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int, server int) {
@@ -582,10 +588,6 @@ func (rf *Raft) SyncLogs() {
 			// there might be some conflict or missing log in the follower
 			if !reply.Success {
 				rf.processFailAppendReply(reply, prevLogIndex, server)
-				return
-			}
-			// ignore the heartbeat AppendEntry
-			if len(logEntries) == 0 {
 				return
 			}
 			rf.processSuccessAppendReply(reply, server)

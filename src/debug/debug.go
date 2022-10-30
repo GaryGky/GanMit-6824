@@ -38,9 +38,9 @@ const (
 
 func init() {
 	debugStart = time.Now()
-	os.RemoveAll("debug.log")
-	oFile, _ = os.Create("debug.log")
-	//oFile = os.Stdout
+	//os.RemoveAll("debug.log")
+	//oFile, _ = os.Create("debug.log")
+	oFile = os.Stdout
 	log.SetOutput(oFile)
 	log.SetFlags(log.Flags() &^ (log.Ldate | log.Ltime))
 }

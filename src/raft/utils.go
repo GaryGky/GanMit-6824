@@ -65,33 +65,59 @@ func isRaftAbleToGrantVote(arg *RequestVoteArgs, rf *Raft) bool {
 			return false
 		}
 		if rf.voteFor.Load() == -1 || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
-			return true
+			if ok := isArgLogLatest(arg, rf); ok {
+				rf.voteFor.Store(int32(arg.Base.FromNodeID))
+				return int(rf.voteFor.Load()) == arg.Base.FromNodeID
+			} else {
+				return false
+			}
 		}
 	} else {
 		// case3: higher term candidate want to compete for leadership
+		defer rf.becomeFollower()
+
 		rf.voteFor.Store(-1)
 		rf.CurrentTerm.Store(arg.Term)
-		defer rf.becomeFollower()
-		myLastIndex, myLastTerm := rf.getLastLogIndexAndTerm()
-		// case3.1: the candidate's log is not up-to-date
-		if myLastTerm > arg.LastLogTerm {
+		return isArgLogLatest(arg, rf)
+	}
+	return true
+}
+
+// compare local log with log in request
+func isArgLogLatest(arg *RequestVoteArgs, rf *Raft) bool {
+	myLastIndex, myLastTerm := rf.getLastLogIndexAndTerm()
+	// case3.1: the candidate's log is not up-to-date
+	if myLastTerm > arg.LastLogTerm {
+		return false
+	}
+	if myLastTerm == arg.LastLogTerm {
+		// case3.2: the candidate log is not up-to-date
+		if myLastIndex > arg.LastLogIndex {
 			return false
-		}
-		if myLastTerm == arg.LastLogTerm {
-			// case3.2: the candidate log is not up-to-date
-			if myLastIndex > arg.LastLogIndex {
-				return false
-			} else {
-				// case3.3: the candidate log is up-to-date
-				return true
-			}
-		}
-		// case4: the candidate log is up-to-date
-		if myLastTerm < arg.LastLogTerm {
+		} else {
+			// case3.3: the candidate log is up-to-date
 			return true
 		}
 	}
+	// case4: the candidate log is up-to-date
+	if myLastTerm < arg.LastLogTerm {
+		return true
+	}
 	return true
+}
+
+func getAppendingLogs(nextIndex int, rf *Raft) []Log {
+	updateUncommittedLogsTerm := func(rf *Raft) {
+		for i := int(rf.CommitIndex.Load()); i < len(rf.LocalLog); i++ {
+			rf.LocalLog[i].Term = rf.CurrentTerm.Load()
+		}
+	}
+
+	if nextIndex >= len(rf.LocalLog) {
+		return []Log{}
+	}
+	updateUncommittedLogsTerm(rf)
+	return rf.LocalLog[nextIndex:]
 }
 
 func printDisconnected(server ...int) {
