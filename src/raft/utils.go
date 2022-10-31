@@ -66,15 +66,14 @@ func isRaftAbleToGrantVote(arg *RequestVoteArgs, rf *Raft) bool {
 		}
 		if rf.voteFor.Load() == -1 || int(rf.voteFor.Load()) == arg.Base.FromNodeID {
 			if ok := isArgLogLatest(arg, rf); ok {
-				rf.voteFor.Store(int32(arg.Base.FromNodeID))
-				return int(rf.voteFor.Load()) == arg.Base.FromNodeID
+				return ok
 			} else {
 				return false
 			}
 		}
 	} else {
 		// case3: higher term candidate want to compete for leadership
-		defer rf.becomeFollower()
+		defer rf.becomeFollower(-1)
 
 		rf.voteFor.Store(-1)
 		rf.CurrentTerm.Store(arg.Term)
@@ -100,15 +99,14 @@ func isArgLogLatest(arg *RequestVoteArgs, rf *Raft) bool {
 		}
 	}
 	// case4: the candidate log is up-to-date
-	if myLastTerm < arg.LastLogTerm {
-		return true
-	}
-	return true
+	return myLastIndex <= arg.LastLogIndex
 }
 
 func getAppendingLogs(nextIndex int, rf *Raft) []Log {
 	updateUncommittedLogsTerm := func(rf *Raft) {
-		for i := int(rf.CommitIndex.Load()); i < len(rf.LocalLog); i++ {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		for i := int(rf.CommitIndex.Load()) + 1; i < len(rf.LocalLog); i++ {
 			rf.LocalLog[i].Term = rf.CurrentTerm.Load()
 		}
 	}
@@ -117,7 +115,12 @@ func getAppendingLogs(nextIndex int, rf *Raft) []Log {
 		return []Log{}
 	}
 	updateUncommittedLogsTerm(rf)
-	return rf.LocalLog[nextIndex:]
+
+	rf.mu.Lock()
+	ret := make([]Log, len(rf.LocalLog)-nextIndex)
+	copy(ret, rf.LocalLog[nextIndex:])
+	rf.mu.Unlock()
+	return ret
 }
 
 func printDisconnected(server ...int) {

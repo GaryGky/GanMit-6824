@@ -18,7 +18,7 @@ var (
 	// ElectionTimeout Within the range if there's no heartbeat from leader, Raft will start an election
 	ElectionTimeout = time.Millisecond * 900
 	// HeartBeatTimeout within the range leader should send a heartbeat to all server
-	HeartBeatTimeout = time.Millisecond * 300
+	HeartBeatTimeout = time.Millisecond * 150
 	// ApplyTimeout within the range, every node should check local logs from (lastApplied, commitIndex]
 	ApplyTimeout = time.Millisecond * 500
 )
@@ -59,8 +59,7 @@ type Raft struct {
 	state            atomic.Value
 
 	// Follower States
-	IsLeaderAlive atomic.Bool // Follower to check whether it should start a new election
-	voteFor       atomic.Int32
+	voteFor atomic.Int32
 	// Candidate States
 	VotesFromPeers atomic.Int32
 
@@ -138,7 +137,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index, term, isLeader := rf.PreProcessLog(command)
 	if !isLeader {
-		return index, term, isLeader
+		return index, term, false
 	}
 	rf.SyncLogs()
 	rf.mu.Lock()
@@ -180,28 +179,28 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.CurrentTerm = atomic.Int32{}
 	rf.voteFor = atomic.Int32{}
 	rf.voteFor.Store(-1)
-	rf.IsLeaderAlive.Store(false)
+
 	rf.LocalLog = make([]Log, 0)
 	rf.CommitIndex = atomic.Int32{}
-	rf.CommitIndex.Store(0)
 	rf.LastAppliedIndex = atomic.Int32{}
+	rf.CommitIndex.Store(0)
 	rf.LastAppliedIndex.Store(0)
+	// append a nop log into local log
+	rf.mu.Lock()
+	rf.LocalLog = append(rf.LocalLog, Log{Term: 0})
+	rf.mu.Unlock()
+
 	rf.NextIndex = sync.Map{}
 	rf.MatchIndex = sync.Map{}
 	rf.state = atomic.Value{}
 	rf.state.Store(Follower)
 	rf.receivedClientRequests = sync.Map{}
 
-	// append a nop log into local log
-	rf.mu.Lock()
-	rf.LocalLog = append(rf.LocalLog, Log{Term: 0})
-	rf.mu.Unlock()
-
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ElectionTimer goroutine to start elections
-	rf.becomeFollower()
+	rf.becomeFollower(-1)
 	go rf.ElectionTimer()
 	go rf.committedLogTimer()
 
@@ -213,20 +212,20 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 // The ElectionTimer go routine starts a new election if this peer hasn't received heartbeats recently.
 func (rf *Raft) ElectionTimer() {
 	for rf.killed() == false {
-		if !rf.IsLeaderAlive.Load() && !rf.isLeader() && rf.voteFor.Load() == int32(-1) {
+		if rf.LeaderID.Load() == -1 && rf.voteFor.Load() == int32(-1) {
 			rf.startElection()
 		}
 		if !rf.isLeader() {
-			rf.IsLeaderAlive.Store(false)
+			rf.LeaderID.Store(-1)
+			rf.voteFor.Store(-1)
+			time.Sleep(ElectionTimeout)
+			time.Sleep(randomTime())
 		}
-		rf.voteFor.Store(-1)
-		time.Sleep(ElectionTimeout)
-		time.Sleep(randomTime())
 	}
 }
 
 func (rf *Raft) heartBeat() {
-	for !rf.killed() && rf.isLeader() && rf.state.Load() == Leader {
+	for !rf.killed() && rf.isLeader() {
 		rf.SyncLogs()
 		time.Sleep(HeartBeatTimeout)
 	}
@@ -299,12 +298,11 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 
 	// force outdated leader to become follower
 	if rf.state.Load().(State) != Follower && rf.me != arg.Base.FromNodeID {
-		rf.becomeFollower()
+		rf.becomeFollower(int32(from))
 	}
 	rf.CurrentTerm.Store(int32(arg.Term))
-	rf.LeaderID.Swap(int32(from))
+	rf.LeaderID.Store(int32(from))
 	rf.voteFor.Store(int32(from))
-	rf.IsLeaderAlive.Store(true)
 	reply.Term = int(rf.CurrentTerm.Load())
 
 	rf.mu.Lock()
@@ -388,11 +386,10 @@ func (rf *Raft) becomeCandidate() {
 	debug.Debug(debug.DInfo, "S%d becomes Candidate in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
-func (rf *Raft) becomeFollower() {
+func (rf *Raft) becomeFollower(leaderID int32) {
 	rf.voteFor.Store(-1)
 	rf.VotesFromPeers.Store(0)
-	rf.LeaderID.Store(-1)
-	rf.IsLeaderAlive.Store(false)
+	rf.LeaderID.Store(leaderID)
 	clearSyncMap(&rf.NextIndex)
 	clearSyncMap(&rf.MatchIndex)
 	rf.state.Store(Follower)
@@ -400,16 +397,17 @@ func (rf *Raft) becomeFollower() {
 }
 
 func (rf *Raft) isLeader() bool {
-	return int(rf.LeaderID.Load()) == rf.me
+	return int(rf.LeaderID.Load()) == rf.me && rf.state.Load() == Leader
 }
 
 func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if nextIndex < 1 {
 		return 0, 0, []Log{}
 	}
-	return nextIndex - 1, int(rf.LocalLog[nextIndex-1].Term), getAppendingLogs(nextIndex, rf)
+	rf.mu.Lock()
+	term := int(rf.LocalLog[nextIndex-1].Term)
+	rf.mu.Unlock()
+	return nextIndex - 1, term, getAppendingLogs(nextIndex, rf)
 }
 
 func (rf *Raft) getLastLogIndexAndTerm() (int, int) {
@@ -467,6 +465,7 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 
 	// leader appends the log locally
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	rf.LocalLog = append(rf.LocalLog, Log{
 		Term:    rf.CurrentTerm.Load(),
 		Command: command,
@@ -478,15 +477,14 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 		index: i,
 		term:  rf.CurrentTerm.Load(),
 	})
-	debug.Debug(debug.DLeader, "S%d, put %v into local log \n", rf.me, command)
-	rf.mu.Unlock()
+	debug.Debug(debug.DLeader, "S%d, put %v into index: %d \n", rf.me, command, i)
 	return 0, 0, true
 }
 
 func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 	// follower's term is larger than leader's term, which means that the leader is out of date
 	if reply.Term > int(rf.CurrentTerm.Load()) {
-		rf.becomeFollower()
+		rf.becomeFollower(-1)
 		return
 	}
 
@@ -507,7 +505,6 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, server int) {
 		})
 		if cnt >= (len(rf.peers)+1)/2 {
 			rf.CommitIndex.Store(int32(i))
-			debug.Debug(debug.DLeader, "S%d increase commitIndex to %d \n", rf.me, i)
 			break
 		}
 	}
@@ -538,7 +535,7 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 	// current node is the outdated leader
 	if int32(reply.Term) > rf.CurrentTerm.Load() {
 		rf.CurrentTerm.Store(int32(reply.Term))
-		rf.becomeFollower()
+		rf.becomeFollower(-1)
 		return
 	}
 
