@@ -68,6 +68,7 @@ type Raft struct {
 	NextIndex              sync.Map
 	MatchIndex             sync.Map
 	receivedClientRequests sync.Map
+	failedRPCCounter       sync.Map
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
@@ -196,6 +197,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.state = atomic.Value{}
 	rf.state.Store(Follower)
 	rf.receivedClientRequests = sync.Map{}
+	rf.failedRPCCounter = sync.Map{}
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -229,7 +231,6 @@ func (rf *Raft) ElectionTimer() {
 
 func (rf *Raft) heartBeat() {
 	for !rf.killed() && rf.isLeader() {
-		debug.Debug(debug.DLeader, "S%d broadcast heartbeat to all \n", rf.me)
 		rf.SyncLogs()
 		time.Sleep(HeartBeatTimeout)
 	}
@@ -410,12 +411,17 @@ func (rf *Raft) becomeCandidate() {
 }
 
 func (rf *Raft) becomeFollower(leaderID int32) {
+	clearLeaderState := func() {
+		clearSyncMap(&rf.NextIndex)
+		clearSyncMap(&rf.MatchIndex)
+		clearSyncMap(&rf.failedRPCCounter)
+		clearSyncMap(&rf.receivedClientRequests)
+	}
 	rf.voteFor.Store(-1)
 	rf.VotesFromPeers.Store(0)
 	rf.LeaderID.Store(leaderID)
-	clearSyncMap(&rf.NextIndex)
-	clearSyncMap(&rf.MatchIndex)
 	rf.state.Store(Follower)
+	clearLeaderState()
 	debug.Debug(debug.DInfo, "S%d becomes Follower in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
@@ -424,26 +430,31 @@ func (rf *Raft) isLeader() bool {
 }
 
 func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
-	getAppendingLogs := func(nextIndex int, rf *Raft) []Log {
-		updateUncommittedLogsTerm := func(rf *Raft) {
-			for i := int(rf.CommitIndex.Load()) + 1; i < len(rf.LocalLog); i++ {
-				rf.LocalLog[i].Term = rf.CurrentTerm.Load()
-			}
-		}
-		if nextIndex >= len(rf.LocalLog) {
+	updateUncommittedLogsTerm := func(logs []Log) []Log {
+		// Raft 5.4.2 says that Raft don't need to send with new Term
+		// Instead, leader can send fewer logs to followers
+
+		//for i := int(rf.CommitIndex.Load()) + 1; i < len(logs); i++ {
+		//	logs[i].Term = rf.CurrentTerm.Load()
+		//}
+
+		return logs
+	}
+	getAppendingLogs := func(nextIndex int, logs []Log) []Log {
+		if nextIndex >= len(logs) {
 			return []Log{}
 		}
-		updateUncommittedLogsTerm(rf)
-		ret := make([]Log, len(rf.LocalLog)-nextIndex)
-		copy(ret, rf.LocalLog[nextIndex:])
-		return ret
+		return updateUncommittedLogsTerm(logs)[nextIndex:]
 	}
 
 	if nextIndex < 1 {
 		return 0, 0, []Log{}
 	}
+
 	rf.mu.Lock()
-	sendingLogs := getAppendingLogs(nextIndex, rf)
+	logCopy := make([]Log, len(rf.LocalLog))
+	copy(logCopy, rf.LocalLog)
+	sendingLogs := getAppendingLogs(nextIndex, logCopy)
 	prevLogTerm := int(rf.LocalLog[nextIndex-1].Term)
 	rf.mu.Unlock()
 	return nextIndex - 1, prevLogTerm, sendingLogs
@@ -529,7 +540,7 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, se
 
 	rf.MatchIndex.Store(server, matchIndex)
 	rf.NextIndex.Store(server, matchIndex+1)
-	debug.Debug(debug.DLog, "S%d increase S%d nextIndex:%d, matchIndex to: %d \n", rf.me, server, reply.LastMatchIndex+1, matchIndex)
+	debug.Debug(debug.DLog, "S%d increase S%d nextIndex:%d, matchIndex to: %d \n", rf.me, server, matchIndex+1, matchIndex)
 
 	// check if leader's commitIndex can be increased
 	rf.mu.Lock()
@@ -592,6 +603,20 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 
 // SyncLogs Leader send local logs based on the nextIndex to followers
 func (rf *Raft) SyncLogs() {
+	mightBePartitioned := func() bool {
+		currentTerm := rf.CurrentTerm.Load()
+		val, ok := rf.failedRPCCounter.Load(currentTerm)
+		if !ok {
+			rf.failedRPCCounter.Store(currentTerm, 1)
+			return false
+		}
+		fails := val.(int) + 1
+		if fails >= (len(rf.peers)+1)/2 {
+			return true
+		}
+		rf.failedRPCCounter.Store(currentTerm, fails)
+		return false
+	}
 	// Leader should start synchronize log here
 	for i := range rf.peers {
 		go func(server int) {
@@ -602,7 +627,6 @@ func (rf *Raft) SyncLogs() {
 				debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
 				return
 			}
-
 			prevLogIndex, prevLogTerm, logEntries := rf.buildAppendEntry(nextIndex.(int))
 			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
 				Term:         int(rf.CurrentTerm.Load()),
@@ -617,6 +641,9 @@ func (rf *Raft) SyncLogs() {
 			}, &reply)
 			if !ok {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
+				if mightBePartitioned() {
+					rf.becomeFollower(-1)
+				}
 				return
 			}
 			// break if the Node is not leader
