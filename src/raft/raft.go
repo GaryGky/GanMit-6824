@@ -290,6 +290,7 @@ func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Base.ToNodeID = arg.Base.FromNodeID
 	reply.Base.FromNodeID = rf.me
 	reply.Term = maxInt32(rf.CurrentTerm.Load(), arg.Term)
+	rf.CurrentTerm.Store(maxInt32(rf.CurrentTerm.Load(), arg.Term))
 
 	if !isRaftAbleToGrantVote(arg, rf) {
 		reply.VoteGranted = false
@@ -342,13 +343,14 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		return
 	}
 
-	conflict, lastMatchIndex := rf.isLogConflict(arg.PrevLogIndex, freshEntries)
+	conflict, lastMatchIndex := rf.isLogConflict(arg.PrevLogIndex, arg.Entries)
 	if conflict {
 		// delete conflict logs and append leader's logs
 		rf.LocalLog = rf.LocalLog[:lastMatchIndex+1]
 	}
 	// append leader's logs into follower's logs
 	rf.LocalLog = append(rf.LocalLog, freshEntries...)
+	debug.Debug(debug.DLog, "S%d's current Log: %v \n", rf.me, rf.LocalLog)
 
 	// set node's commitIndex
 	if arg.LeaderCommit > rf.CommitIndex.Load() {
