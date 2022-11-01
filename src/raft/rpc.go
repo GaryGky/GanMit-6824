@@ -80,8 +80,8 @@ func (r *RequestVoteReply) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
 func (r *RequestVoteReply) PrintDebugInfo() {
-	debug.Debug(debug.DClient, "S%d -> S%d, RequestVoteReply:{Term: %d, Granted: %v} \n",
-		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.VoteGranted)
+	debug.Debug(debug.DClient, "S%d <- S%d, RequestVoteReply:{Term: %d, Granted: %v} \n",
+		r.Base.ToNodeID, r.Base.FromNodeID, r.Term, r.VoteGranted)
 }
 
 func (r *AppendEntryArgs) GetAllCaseByUserID() (int, int) {
@@ -96,8 +96,8 @@ func (r *AppendEntryReply) GetAllCaseByUserID() (int, int) {
 	return r.Base.FromNodeID, r.Base.ToNodeID
 }
 func (r *AppendEntryReply) PrintDebugInfo() {
-	debug.Debug(debug.DClient, "S%d -> S%d, AppendEntryReply: {Term: %d, Success: %v, LastMatchIndex: %d} \n",
-		r.Base.FromNodeID, r.Base.ToNodeID, r.Term, r.Success, r.LastMatchIndex)
+	debug.Debug(debug.DClient, "S%d <- S%d, AppendEntryReply: {Term: %d, Success: %v, LastMatchIndex: %d} \n",
+		r.Base.ToNodeID, r.Base.FromNodeID, r.Term, r.Success, r.LastMatchIndex)
 }
 
 func rpcCall(endpoint *labrpc.ClientEnd, method string, args BaseMessage, reply BaseMessage) bool {

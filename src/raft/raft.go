@@ -18,9 +18,9 @@ var (
 	// ElectionTimeout Within the range if there's no heartbeat from leader, Raft will start an election
 	ElectionTimeout = time.Millisecond * 900
 	// HeartBeatTimeout within the range leader should send a heartbeat to all server
-	HeartBeatTimeout = time.Millisecond * 150
+	HeartBeatTimeout = time.Millisecond * 300
 	// ApplyTimeout within the range, every node should check local logs from (lastApplied, commitIndex]
-	ApplyTimeout = time.Millisecond * 300
+	ApplyTimeout = time.Millisecond * 500
 )
 
 type State int
@@ -43,11 +43,12 @@ type AlreadyApplyLog struct {
 
 // Raft object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // PhaseLock to protect shared access to this peer's state
-	peers     []*labrpc.ClientEnd // (READ ONLY) RPC end points of all peers
-	persister *Persister          // Object to hold this peer's persisted state
-	me        int                 // this peer's index into peers[]
-	dead      atomic.Int32        // set by Kill()
+	mu                sync.Mutex          // PhaseLock to protect shared access to this peer's state
+	peers             []*labrpc.ClientEnd // (READ ONLY) RPC end points of all peers
+	persister         *Persister          // Object to hold this peer's persisted state
+	me                int                 // this peer's index into peers[]
+	dead              atomic.Int32        // set by Kill()
+	handlerTimerMutex sync.Mutex
 
 	// All State
 	LocalLog         []Log
@@ -141,9 +142,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return index, term, false
 	}
 	rf.SyncLogs()
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return len(rf.LocalLog) - 1, int(rf.CurrentTerm.Load()), rf.isLeader()
+	return index, term, rf.isLeader()
 }
 
 // Kill
@@ -172,6 +171,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.persister = persister
 	rf.me = me
 	rf.mu = sync.Mutex{}
+	rf.handlerTimerMutex = sync.Mutex{}
 	rf.applyChan = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -213,9 +213,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 // The ElectionTimer go routine starts a new election if this peer hasn't received heartbeats recently.
 func (rf *Raft) ElectionTimer() {
 	for rf.killed() == false {
+		rf.handlerTimerMutex.Lock()
 		if rf.LeaderID.Load() == -1 && rf.voteFor.Load() == int32(-1) {
 			rf.startElection()
 		}
+		rf.handlerTimerMutex.Unlock()
 		if !rf.isLeader() {
 			rf.LeaderID.Store(-1)
 			rf.voteFor.Store(-1)
@@ -282,6 +284,8 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
+	rf.handlerTimerMutex.Lock()
+	defer rf.handlerTimerMutex.Unlock()
 	reply.Base.ToNodeID = arg.Base.FromNodeID
 	reply.Base.FromNodeID = rf.me
 	reply.Term = maxInt32(rf.CurrentTerm.Load(), arg.Term)
@@ -296,6 +300,9 @@ func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 
 // AppendEntry RPC Handler
 func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
+	rf.handlerTimerMutex.Lock()
+	defer rf.handlerTimerMutex.Unlock()
+
 	reply.Base.FromNodeID = rf.me
 	reply.Base.ToNodeID = arg.Base.FromNodeID
 	from, _ := arg.GetAllCaseByUserID()
@@ -436,9 +443,10 @@ func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
 		return 0, 0, []Log{}
 	}
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	sendingLogs := getAppendingLogs(nextIndex, rf)
 	prevLogTerm := int(rf.LocalLog[nextIndex-1].Term)
-	return nextIndex - 1, prevLogTerm, getAppendingLogs(nextIndex, rf)
+	rf.mu.Unlock()
+	return nextIndex - 1, prevLogTerm, sendingLogs
 }
 
 func (rf *Raft) getLastLogIndexAndTerm() (int, int) {
@@ -503,13 +511,13 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 	})
 
 	// put the log into local log
-	i := len(rf.LocalLog) - 1
-	rf.receivedClientRequests.Store(rf.LocalLog[i].Command, AlreadyApplyLog{
-		index: i,
+	index = len(rf.LocalLog) - 1
+	rf.receivedClientRequests.Store(rf.LocalLog[index].Command, AlreadyApplyLog{
+		index: index,
 		term:  rf.CurrentTerm.Load(),
 	})
-	debug.Debug(debug.DLeader, "S%d, put %v into index: %d \n", rf.me, command, i)
-	return 0, 0, true
+	debug.Debug(debug.DLeader, "S%d, put %v into index: %d \n", rf.me, command, index)
+	return index, int(rf.CurrentTerm.Load()), true
 }
 
 func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, server int) {
@@ -532,7 +540,6 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, se
 		rf.MatchIndex.Range(func(key, value any) bool {
 			if value.(int) >= i {
 				cnt++
-				debug.Debug(debug.DInfo, "S%d match index %d, counter: %d \n", key, i, cnt)
 			}
 			return true
 		})
@@ -597,7 +604,6 @@ func (rf *Raft) SyncLogs() {
 			}
 
 			prevLogIndex, prevLogTerm, logEntries := rf.buildAppendEntry(nextIndex.(int))
-			debug.Debug(debug.DInfo, "S%d buildAppendEntry with nextIndex: %d, logEntries: %v \n", rf.me, nextIndex.(int), logEntries)
 			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
 				Term:         int(rf.CurrentTerm.Load()),
 				PrevLogIndex: prevLogIndex,
@@ -636,9 +642,6 @@ func (rf *Raft) flushLocalLog(log []Log) {
 		}
 		rf.LastAppliedIndex.Add(1)
 		debug.Debug(debug.DLog2, "S%d apply log: (command:%v, i: %d) finished! \n", rf.me, log[i].Command, i)
-	}
-	if rf.isLeader() {
-		rf.SyncLogs()
 	}
 }
 

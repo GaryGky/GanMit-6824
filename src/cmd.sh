@@ -14,7 +14,7 @@ pretty-log:
 
 concurrent-test:
   # shellcheck disable=SC2016
-  rg 'func (Test.*2B)\(' -oNr '$1' test_test.go | xargs ../dstest.py --workers 10 --iter 10 --output .run --race
+  rg 'func (Test.*2B)\(' -oNr '$1' test_test.go | xargs ../dstest.py --workers 20 --iter 50 --output .run --race
   rm -r ./raft/.run
   # shellcheck disable=SC2016
-  ../dstest.py TestFailNoAgree2B --workers 10 --output .run --race --iter 10
+  ../dstest.py TestConcurrentStarts2B --workers 10 --output .run --race --iter 10
