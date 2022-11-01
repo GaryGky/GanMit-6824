@@ -9,12 +9,12 @@ clean:
   rm -f mr-*
 
 pretty-log:
-   ./dslog.py ./raft/.run/TestFailNoAgree2B_46.log -c 3 -j ERRO,CLNT,LEAD,TEST,LOG1,INFO,LOG2
-   ./dslog.py ./raft/debug.log -c 3 -j ERRO,CLNT,LEAD,TEST,LOG1,INFO,LOG2
+   ../dslog.py .run/TestFailNoAgree2B_0.log -c 5 -j ERRO,CLNT,LEAD,TEST,LOG1,INFO,LOG2
+   ../dslog.py /debug.log -c 3 -j ERRO,CLNT,LEAD,TEST,LOG1,INFO,LOG2
 
 concurrent-test:
   # shellcheck disable=SC2016
   rg 'func (Test.*2B)\(' -oNr '$1' test_test.go | xargs ../dstest.py --workers 10 --iter 10 --output .run --race
   rm -r ./raft/.run
   # shellcheck disable=SC2016
-  ../dstest.py TestFailAgree2B --workers 10 --output .run --race
+  ../dstest.py TestFailNoAgree2B --workers 10 --output .run --race --iter 10
