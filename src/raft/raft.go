@@ -384,8 +384,8 @@ func (rf *Raft) removeDuplicateLogsInArg(appendingLogs []Log) []Log {
 func (rf *Raft) becomeLeader() {
 	rf.LeaderID.Store(int32(rf.me))
 	rf.initNextAndMatch()
-	go rf.heartBeat()
 	rf.state.Store(Leader)
+	go rf.heartBeat()
 	debug.Debug(debug.DInfo, "S%d becomes Leader in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
@@ -433,10 +433,16 @@ func (rf *Raft) buildAppendEntry(nextIndex int) (int, int32, []Log) {
 		if nextIndex >= len(logs) {
 			return []Log{}
 		}
+		logCopy := make([]Log, 0)
+		for _, log := range logs[nextIndex:] {
+			logCopy = append(logCopy, log)
+		}
 		return logs[nextIndex:]
 	}
 	rf.mu.Lock()
-	sendingLogs := getAppendingLogs(nextIndex, rf.LocalLog)
+	logCopy := make([]Log, len(rf.LocalLog))
+	copy(logCopy, rf.LocalLog)
+	sendingLogs := getAppendingLogs(nextIndex, logCopy)
 	prevLogTerm := rf.LocalLog[nextIndex-1].Term
 	rf.mu.Unlock()
 	return nextIndex - 1, prevLogTerm, sendingLogs

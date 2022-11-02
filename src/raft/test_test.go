@@ -192,7 +192,7 @@ func TestRPCBytes2B(t *testing.T) {
 }
 
 // test just failure of followers.
-func For2023TestFollowerFailure2B(t *testing.T) {
+func TestFollowerFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -237,7 +237,7 @@ func For2023TestFollowerFailure2B(t *testing.T) {
 }
 
 // test just failure of leaders.
-func For2023TestLeaderFailure2B(t *testing.T) {
+func TestLeaderFailure2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
@@ -352,6 +352,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	cfg.connect((leader + 3) % servers)
 	printConnected((leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 
+	time.Sleep(2 * RaftElectionTimeout)
 	// the disconnected majority may have chosen a leader from
 	// among their own ranks, forgetting index 2.
 	leader2 := cfg.checkOneLeader()
