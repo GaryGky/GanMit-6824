@@ -17,4 +17,4 @@ concurrent-test:
   rg 'func (Test.*2B)\(' -oNr '$1' test_test.go | xargs ../dstest.py --workers 20 --iter 50 --output .run --race
   rm -r ./raft/.run
   # shellcheck disable=SC2016
-  ../dstest.py TestFailAgree2B --workers 10 --output .run --race --iter 20
+  ../dstest.py TestFailNoAgree2B --workers 10 --output .run --race --iter 20

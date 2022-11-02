@@ -48,7 +48,8 @@ type Raft struct {
 	persister         *Persister          // Object to hold this peer's persisted state
 	me                int                 // this peer's index into peers[]
 	dead              atomic.Int32        // set by Kill()
-	handlerTimerMutex sync.Mutex
+	handlerTimerMutex sync.Mutex          // mutex election timer with RPC handler (RequestVote & AppendEntry)
+	stateSyncLogMutex sync.Mutex          // mutex GetState and SyncLogs
 
 	// All State
 	LocalLog         []Log
@@ -73,6 +74,8 @@ type Raft struct {
 
 // GetState return currentTerm and whether this server believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+	rf.stateSyncLogMutex.Lock()
+	defer rf.stateSyncLogMutex.Unlock()
 	return int(rf.CurrentTerm.Load()), int(rf.LeaderID.Load()) == rf.me
 }
 
@@ -142,7 +145,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	if !isLeader {
 		return index, int(term), false
 	}
-	rf.SyncLogs(term)
+	go func() {
+		RecoverAndLog()
+		rf.SyncLogs(term)
+	}()
 	return index, int(term), rf.isLeader()
 }
 
@@ -173,6 +179,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.me = me
 	rf.mu = sync.Mutex{}
 	rf.handlerTimerMutex = sync.Mutex{}
+	rf.stateSyncLogMutex = sync.Mutex{}
 	rf.applyChan = applyCh
 
 	// Your initialization code here (2A, 2B, 2C).
@@ -607,49 +614,57 @@ func (rf *Raft) SyncLogs(currentTerm int32) {
 		}
 		return false
 	}
-
-	// Leader should start synchronize log here
-	for i := range rf.peers {
-		go func(server int) {
-			RecoverAndLog()
-			reply := AppendEntryReply{}
-			nextIndex, ok := rf.NextIndex.Load(server)
-			if !ok {
-				debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
-				return
-			}
-			prevLogIndex, prevLogTerm, logEntries := rf.buildAppendEntry(nextIndex.(int))
-			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
-				Term:         currentTerm,
-				PrevLogIndex: prevLogIndex,
-				PrevLogTerm:  prevLogTerm,
-				LeaderCommit: rf.CommitIndex.Load(),
-				Entries:      logEntries,
-				Base: Base{
-					FromNodeID: rf.me,
-					ToNodeID:   server,
-				},
-			}, &reply)
-			if !ok {
-				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
-				if isLeaderDisconnected(reply) {
-					rf.becomeFollower(-1)
+	broadCastAndHandleResult := func() {
+		// Leader should start synchronize log here
+		wg := sync.WaitGroup{}
+		wg.Add(len(rf.peers))
+		for i := range rf.peers {
+			go func(server int) {
+				RecoverAndLog()
+				defer wg.Done()
+				reply := AppendEntryReply{}
+				nextIndex, ok := rf.NextIndex.Load(server)
+				if !ok {
+					debug.Debug(debug.DError, "S%d GetNextIndex in Log failed, to S%d \n", rf.me, server)
+					return
 				}
-				return
-			}
-			clearSyncMap(&rf.failedRPCCounter)
-			// break if the Node is not leader
-			if !rf.isLeader() {
-				return
-			}
-			// there might be some conflict or missing log in the follower
-			if !reply.Success {
-				rf.processFailAppendReply(reply, prevLogIndex, server)
-				return
-			}
-			rf.processSuccessAppendReply(reply, prevLogIndex+len(logEntries), server)
-		}(i)
+				prevLogIndex, prevLogTerm, logEntries := rf.buildAppendEntry(nextIndex.(int))
+				ok = rf.sendAppendEntry(server, &AppendEntryArgs{
+					Term:         currentTerm,
+					PrevLogIndex: prevLogIndex,
+					PrevLogTerm:  prevLogTerm,
+					LeaderCommit: rf.CommitIndex.Load(),
+					Entries:      logEntries,
+					Base: Base{
+						FromNodeID: rf.me,
+						ToNodeID:   server,
+					},
+				}, &reply)
+				if !ok {
+					debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
+					if isLeaderDisconnected(reply) {
+						rf.becomeFollower(-1)
+					}
+					return
+				}
+				clearSyncMap(&rf.failedRPCCounter)
+				// break if the Node is not leader
+				if !rf.isLeader() {
+					return
+				}
+				// there might be some conflict or missing log in the follower
+				if !reply.Success {
+					rf.processFailAppendReply(reply, prevLogIndex, server)
+					return
+				}
+				rf.processSuccessAppendReply(reply, prevLogIndex+len(logEntries), server)
+			}(i)
+		}
+		wg.Wait()
 	}
+	rf.stateSyncLogMutex.Lock()
+	broadCastAndHandleResult()
+	rf.stateSyncLogMutex.Unlock()
 }
 
 func (rf *Raft) flushLocalLog(log []Log, commitIndex int) {

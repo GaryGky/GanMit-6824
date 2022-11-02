@@ -10,6 +10,8 @@ package raft
 
 import (
 	"testing"
+
+	"6.824/debug"
 )
 import "fmt"
 import "time"
@@ -329,8 +331,9 @@ func TestFailNoAgree2B(t *testing.T) {
 	printDisconnected((leader+1)%servers, (leader+2)%servers, (leader+3)%servers)
 
 	index, _, ok := cfg.rafts[leader].Start(20)
+	debug.Debug(debug.DTest, "leader: S%d, command20's index: %d, is_success: %v \n", leader, index, ok)
 	if ok != true {
-		t.Fatalf("leader rejected Start()")
+		t.Fatalf("leader:%d rejected Start() \n", leader)
 	}
 	if index != 2 {
 		t.Fatalf("expected index 2, got %v", index)
@@ -354,7 +357,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	leader2 := cfg.checkOneLeader()
 	index2, _, ok2 := cfg.rafts[leader2].Start(30)
 	if ok2 == false {
-		t.Fatalf("leader2 rejected Start()")
+		t.Fatalf("leader2:%d rejected Start() \n", leader2)
 	}
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
