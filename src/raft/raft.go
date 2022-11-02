@@ -70,6 +70,10 @@ type Raft struct {
 	MatchIndex             sync.Map
 	receivedClientRequests sync.Map
 	failedRPCCounter       sync.Map
+
+	// Timer
+	electionTimer  *time.Timer
+	heartBeatTimer *time.Timer
 }
 
 // GetState return currentTerm and whether this server believes it is the leader.
@@ -202,41 +206,35 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 	rf.state.Store(Follower)
 	rf.receivedClientRequests = sync.Map{}
 	rf.failedRPCCounter = sync.Map{}
+	rf.electionTimer = time.NewTimer(randomTime(ElectionTimeout))
+	rf.heartBeatTimer = time.NewTimer(HeartBeatTimeout)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
 	// start ElectionTimer goroutine to start elections
 	rf.becomeFollower(-1)
-	go rf.ElectionTimer()
+	go rf.ticker()
 	go rf.committedLogTimer()
 
 	return rf
 }
 
 // -------- Timer ---------------
-
-// The ElectionTimer go routine starts a new election if this peer hasn't received heartbeats recently.
-func (rf *Raft) ElectionTimer() {
-	for rf.killed() == false {
-		rf.handlerTimerMutex.Lock()
-		if rf.LeaderID.Load() == -1 && rf.voteFor.Load() == int32(-1) {
+func (rf *Raft) ticker() {
+	for !rf.killed() {
+		select {
+		case <-rf.electionTimer.C:
+			rf.handlerTimerMutex.Lock()
 			rf.startElection()
+			rf.electionTimer.Reset(randomTime(ElectionTimeout))
+			rf.handlerTimerMutex.Unlock()
+		case <-rf.heartBeatTimer.C:
+			if !rf.killed() && rf.isLeader() {
+				rf.SyncLogs(rf.CurrentTerm.Load())
+			}
+			rf.heartBeatTimer.Reset(HeartBeatTimeout)
 		}
-		rf.handlerTimerMutex.Unlock()
-		if !rf.isLeader() {
-			rf.LeaderID.Store(-1)
-			rf.voteFor.Store(-1)
-			time.Sleep(ElectionTimeout)
-			time.Sleep(randomTime())
-		}
-	}
-}
-
-func (rf *Raft) heartBeat() {
-	for !rf.killed() && rf.isLeader() {
-		rf.SyncLogs(rf.CurrentTerm.Load())
-		time.Sleep(HeartBeatTimeout)
 	}
 }
 
@@ -293,6 +291,7 @@ func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 	}
 	reply.VoteGranted = true
 	rf.voteFor.Store(int32(arg.Base.FromNodeID))
+	rf.electionTimer.Reset(randomTime(ElectionTimeout))
 }
 
 // AppendEntry RPC Handler
@@ -309,6 +308,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = false
 		return
 	}
+	defer rf.electionTimer.Reset(randomTime(ElectionTimeout))
 
 	// force outdated leader to become follower
 	if rf.state.Load().(State) != Follower && rf.me != arg.Base.FromNodeID {
@@ -385,7 +385,8 @@ func (rf *Raft) becomeLeader() {
 	rf.LeaderID.Store(int32(rf.me))
 	rf.initNextAndMatch()
 	rf.state.Store(Leader)
-	go rf.heartBeat()
+	rf.heartBeatTimer.Reset(HeartBeatTimeout)
+	rf.electionTimer.Stop()
 	debug.Debug(debug.DInfo, "S%d becomes Leader in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
@@ -402,6 +403,7 @@ func (rf *Raft) becomeCandidate() {
 	rf.voteFor.Store(-1)
 	rf.VotesFromPeers.Swap(0)
 	rf.CurrentTerm.Add(1)
+	rf.LeaderID.Store(-1)
 	rf.state.Store(Candidate)
 	debug.Debug(debug.DInfo, "S%d becomes Candidate in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
@@ -417,6 +419,7 @@ func (rf *Raft) becomeFollower(leaderID int32) {
 	rf.LeaderID.Store(leaderID)
 	rf.state.Store(Follower)
 	clearLeaderState()
+	rf.electionTimer.Reset(randomTime(ElectionTimeout))
 	debug.Debug(debug.DInfo, "S%d becomes Follower in Term %d \n", rf.me, rf.CurrentTerm.Load())
 }
 
@@ -568,7 +571,7 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 		}
 		currentNextIndex := val.(int) - 1
 		for currentNextIndex > potentialMatchedIndex {
-			if rf.LocalLog[currentNextIndex].Term != int32(conflictTerm) {
+			if rf.LocalLog[currentNextIndex].Term != conflictTerm {
 				break
 			}
 			currentNextIndex--

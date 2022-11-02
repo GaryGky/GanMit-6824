@@ -44,8 +44,8 @@ func RecoverAndLog() {
 	}
 }
 
-func randomTime() time.Duration {
-	return time.Duration(rand.Intn(10)) * time.Millisecond
+func randomTime(duration time.Duration) time.Duration {
+	return time.Duration(rand.Intn(10))*time.Millisecond + duration
 }
 
 func clearSyncMap(p *sync.Map) {
