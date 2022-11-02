@@ -140,10 +140,10 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index, term, isLeader := rf.PreProcessLog(command)
 	if !isLeader {
-		return index, term, false
+		return index, int(term), false
 	}
-	rf.SyncLogs()
-	return index, term, rf.isLeader()
+	rf.SyncLogs(term)
+	return index, int(term), rf.isLeader()
 }
 
 // Kill
@@ -231,7 +231,7 @@ func (rf *Raft) ElectionTimer() {
 
 func (rf *Raft) heartBeat() {
 	for !rf.killed() && rf.isLeader() {
-		rf.SyncLogs()
+		rf.SyncLogs(rf.CurrentTerm.Load())
 		time.Sleep(HeartBeatTimeout)
 	}
 }
@@ -262,19 +262,7 @@ func (rf *Raft) committedLogTimer() {
 // A false return can be caused by a dead server, a live server that
 // can't be reached, a lost request, or a lost reply.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	endPoint := rf.peers[server]
-	ok := rpcCall(endPoint, "Raft.RequestVote", args, reply)
-	if !ok {
-		return false
-	}
-
-	if reply.VoteGranted {
-		rf.VotesFromPeers.Add(1)
-		if rf.VotesFromPeers.Load() == int32((len(rf.peers)+1)/2) {
-			rf.becomeLeader()
-		}
-	}
-	return ok
+	return rpcCall(rf.peers[server], "Raft.RequestVote", args, reply)
 }
 
 // sendAppendEntry in heartbeat and log replication
@@ -418,7 +406,6 @@ func (rf *Raft) becomeFollower(leaderID int32) {
 	clearLeaderState := func() {
 		clearSyncMap(&rf.NextIndex)
 		clearSyncMap(&rf.MatchIndex)
-		clearSyncMap(&rf.failedRPCCounter)
 		clearSyncMap(&rf.receivedClientRequests)
 	}
 	rf.voteFor.Store(-1)
@@ -434,31 +421,18 @@ func (rf *Raft) isLeader() bool {
 }
 
 func (rf *Raft) buildAppendEntry(nextIndex int) (int, int32, []Log) {
-	updateUncommittedLogsTerm := func(logs []Log) []Log {
-		// Raft 5.4.2 says that Raft don't need to send with new Term
-		// Instead, leader can send fewer logs to followers
-
-		//for i := int(rf.CommitIndex.Load()) + 1; i < len(logs); i++ {
-		//	logs[i].Term = rf.CurrentTerm.Load()
-		//}
-
-		return logs
-	}
-	getAppendingLogs := func(nextIndex int, logs []Log) []Log {
-		if nextIndex >= len(logs) {
-			return []Log{}
-		}
-		return updateUncommittedLogsTerm(logs)[nextIndex:]
-	}
-
 	if nextIndex < 1 {
 		return 0, 0, []Log{}
 	}
 
+	getAppendingLogs := func(nextIndex int, logs []Log) []Log {
+		if nextIndex >= len(logs) {
+			return []Log{}
+		}
+		return logs[nextIndex:]
+	}
 	rf.mu.Lock()
-	logCopy := make([]Log, len(rf.LocalLog))
-	copy(logCopy, rf.LocalLog)
-	sendingLogs := getAppendingLogs(nextIndex, logCopy)
+	sendingLogs := getAppendingLogs(nextIndex, rf.LocalLog)
 	prevLogTerm := rf.LocalLog[nextIndex-1].Term
 	rf.mu.Unlock()
 	return nextIndex - 1, prevLogTerm, sendingLogs
@@ -492,29 +466,33 @@ func (rf *Raft) startElection() {
 		go func(server int) {
 			defer RecoverAndLog()
 			reply := &RequestVoteReply{}
-			ok := rf.sendRequestVote(server, req, reply)
-			if !ok {
-				debug.Debug(debug.DError, "S%d startElection failed, to S%d \n", rf.me, server)
-			}
+			rf.sendRequestVote(server, req, reply)
+			rf.processRequestVoteReply(*reply)
 		}(i)
+	}
+}
+
+func (rf *Raft) processRequestVoteReply(reply RequestVoteReply) {
+	if reply.Term == rf.CurrentTerm.Load() && reply.VoteGranted {
+		rf.VotesFromPeers.Add(1)
+		if rf.VotesFromPeers.Load() == int32((len(rf.peers)+1)/2) {
+			rf.becomeLeader()
+		}
 	}
 }
 
 // PreProcessLog Do some checks before apply to command to local log
 // e.g: whether the command has already been processed
-func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
+func (rf *Raft) PreProcessLog(command interface{}) (int, int32, bool) {
 	debug.Debug(debug.DTrace, "S%d Receive %v from client, \n", rf.me, command)
-	index := -1
-	term := -1
-
 	// just discard this message
 	if !rf.isLeader() {
-		return index, term, false
+		return -1, -1, false
 	}
 
 	// check if the log already processed
 	if val, ok := rf.receivedClientRequests.Load(command); ok {
-		return val.(AlreadyApplyLog).index, int(val.(AlreadyApplyLog).term), true
+		return val.(AlreadyApplyLog).index, val.(AlreadyApplyLog).term, true
 	}
 
 	// leader appends the log locally
@@ -526,13 +504,13 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 	})
 
 	// put the log into local log
-	index = len(rf.LocalLog) - 1
+	index := len(rf.LocalLog) - 1
 	rf.receivedClientRequests.Store(rf.LocalLog[index].Command, AlreadyApplyLog{
 		index: index,
 		term:  rf.CurrentTerm.Load(),
 	})
 	debug.Debug(debug.DLeader, "S%d, put %v into index: %d \n", rf.me, command, index)
-	return index, int(rf.CurrentTerm.Load()), true
+	return index, rf.CurrentTerm.Load(), true
 }
 
 func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, server int) {
@@ -549,7 +527,6 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, se
 	// check if leader's commitIndex can be increased
 	rf.mu.Lock()
 	n := len(rf.LocalLog)
-	rf.mu.Unlock()
 	for i := n - 1; i > int(rf.CommitIndex.Load()); i-- {
 		cnt := 0
 		rf.MatchIndex.Range(func(key, value any) bool {
@@ -564,6 +541,7 @@ func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, se
 			break
 		}
 	}
+	rf.mu.Unlock()
 }
 
 func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int, server int) {
@@ -589,8 +567,7 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 	}
 
 	// current node is the outdated leader
-	if int32(reply.Term) > rf.CurrentTerm.Load() {
-		rf.CurrentTerm.Store(int32(reply.Term))
+	if reply.Term > rf.CurrentTerm.Load() {
 		rf.becomeFollower(-1)
 		return
 	}
@@ -606,22 +583,28 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 }
 
 // SyncLogs Leader send local logs based on the nextIndex to followers
-func (rf *Raft) SyncLogs() {
-	mightBePartitioned := func(reply AppendEntryReply) bool {
-		currentTerm := rf.CurrentTerm.Load()
+func (rf *Raft) SyncLogs(currentTerm int32) {
+	isLeaderDisconnected := func(reply AppendEntryReply) bool {
 		if reply.Term != (currentTerm) {
 			return false
 		}
-		val, ok := rf.failedRPCCounter.Load(currentTerm)
+
+		server := reply.Base.FromNodeID
+		val, ok := rf.failedRPCCounter.Load(server)
 		if !ok {
-			rf.failedRPCCounter.Store(currentTerm, 1)
+			rf.failedRPCCounter.Store(server, 1)
 			return false
 		}
-		fails := val.(int) + 1
-		if fails >= (len(rf.peers) + 1) {
+		rf.failedRPCCounter.Store(currentTerm, val.(int)+1)
+
+		disconnectedServerCnt := 0
+		rf.failedRPCCounter.Range(func(key, value any) bool {
+			disconnectedServerCnt += 1
+			return true
+		})
+		if disconnectedServerCnt > (len(rf.peers)+1)/2 {
 			return true
 		}
-		rf.failedRPCCounter.Store(currentTerm, fails)
 		return false
 	}
 
@@ -637,7 +620,7 @@ func (rf *Raft) SyncLogs() {
 			}
 			prevLogIndex, prevLogTerm, logEntries := rf.buildAppendEntry(nextIndex.(int))
 			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
-				Term:         rf.CurrentTerm.Load(),
+				Term:         currentTerm,
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
 				LeaderCommit: rf.CommitIndex.Load(),
@@ -649,7 +632,7 @@ func (rf *Raft) SyncLogs() {
 			}, &reply)
 			if !ok {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
-				if mightBePartitioned(reply) {
+				if isLeaderDisconnected(reply) {
 					rf.becomeFollower(-1)
 				}
 				return

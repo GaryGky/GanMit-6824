@@ -105,7 +105,6 @@ func rpcCall(endpoint *labrpc.ClientEnd, method string, args BaseMessage, reply 
 	args.PrintDebugInfo()
 	ok := endpoint.Call(method, args, reply)
 	if !ok {
-		// don't print wrong information here
 		return false
 	}
 	reply.PrintDebugInfo()
