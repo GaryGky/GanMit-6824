@@ -244,9 +244,10 @@ func (rf *Raft) committedLogTimer() {
 		rf.mu.Lock()
 		log := make([]Log, len(rf.LocalLog))
 		copy(log, rf.LocalLog)
+		committedIndex := rf.CommitIndex.Load()
 		rf.mu.Unlock()
 
-		rf.flushLocalLog(log)
+		rf.flushLocalLog(log, int(committedIndex))
 		time.Sleep(ApplyTimeout)
 	}
 }
@@ -286,11 +287,13 @@ func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *Append
 // RequestVote RPC handler.
 func (rf *Raft) RequestVote(arg *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.handlerTimerMutex.Lock()
-	defer rf.handlerTimerMutex.Unlock()
-	reply.Base.ToNodeID = arg.Base.FromNodeID
-	reply.Base.FromNodeID = rf.me
-	reply.Term = maxInt32(rf.CurrentTerm.Load(), arg.Term)
-	rf.CurrentTerm.Store(maxInt32(rf.CurrentTerm.Load(), arg.Term))
+	defer func() {
+		rf.handlerTimerMutex.Unlock()
+		rf.CurrentTerm.Store(maxInt32(rf.CurrentTerm.Load(), arg.Term))
+		reply.Base.ToNodeID = arg.Base.FromNodeID
+		reply.Base.FromNodeID = rf.me
+		reply.Term = maxInt32(rf.CurrentTerm.Load(), arg.Term)
+	}()
 
 	if !isRaftAbleToGrantVote(arg, rf) {
 		reply.VoteGranted = false
@@ -308,9 +311,9 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	reply.Base.FromNodeID = rf.me
 	reply.Base.ToNodeID = arg.Base.FromNodeID
 	from, _ := arg.GetAllCaseByUserID()
-	reply.Term = int(rf.CurrentTerm.Load())
+	reply.Term = rf.CurrentTerm.Load()
 
-	if arg.Term < int(rf.CurrentTerm.Load()) {
+	if arg.Term < (rf.CurrentTerm.Load()) {
 		reply.Success = false
 		return
 	}
@@ -322,7 +325,7 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.CurrentTerm.Store(int32(arg.Term))
 	rf.LeaderID.Store(int32(from))
 	rf.voteFor.Store(int32(from))
-	reply.Term = int(rf.CurrentTerm.Load())
+	reply.Term = rf.CurrentTerm.Load()
 
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -350,13 +353,12 @@ func (rf *Raft) AppendEntry(arg *AppendEntryArgs, reply *AppendEntryReply) {
 	}
 	// append leader's logs into follower's logs
 	rf.LocalLog = append(rf.LocalLog, freshEntries...)
-	debug.Debug(debug.DLog, "S%d's current Log: %v \n", rf.me, rf.LocalLog)
 
 	// set node's commitIndex
 	if arg.LeaderCommit > rf.CommitIndex.Load() {
 		rf.CommitIndex.Store(minInt32(arg.LeaderCommit, int32(len(rf.LocalLog)-1)))
 	}
-	debug.Debug(debug.DLog, "S%d append %v into local log, now commitIndex: %d \n", rf.me, freshEntries, rf.CommitIndex.Load())
+	debug.Debug(debug.DLog, "S%d append %v into local log, log length:%d, now commitIndex: %d \n", rf.me, freshEntries, len(rf.LocalLog), rf.CommitIndex.Load())
 
 	computeLastIndex := func() int {
 		//if len(freshEntries) == 0 {
@@ -431,7 +433,7 @@ func (rf *Raft) isLeader() bool {
 	return int(rf.LeaderID.Load()) == rf.me && rf.state.Load() == Leader
 }
 
-func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
+func (rf *Raft) buildAppendEntry(nextIndex int) (int, int32, []Log) {
 	updateUncommittedLogsTerm := func(logs []Log) []Log {
 		// Raft 5.4.2 says that Raft don't need to send with new Term
 		// Instead, leader can send fewer logs to followers
@@ -457,7 +459,7 @@ func (rf *Raft) buildAppendEntry(nextIndex int) (int, int, []Log) {
 	logCopy := make([]Log, len(rf.LocalLog))
 	copy(logCopy, rf.LocalLog)
 	sendingLogs := getAppendingLogs(nextIndex, logCopy)
-	prevLogTerm := int(rf.LocalLog[nextIndex-1].Term)
+	prevLogTerm := rf.LocalLog[nextIndex-1].Term
 	rf.mu.Unlock()
 	return nextIndex - 1, prevLogTerm, sendingLogs
 }
@@ -535,7 +537,7 @@ func (rf *Raft) PreProcessLog(command interface{}) (int, int, bool) {
 
 func (rf *Raft) processSuccessAppendReply(reply AppendEntryReply, matchIndex, server int) {
 	// follower's term is larger than leader's term, which means that the leader is out of date
-	if reply.Term > int(rf.CurrentTerm.Load()) {
+	if reply.Term > (rf.CurrentTerm.Load()) {
 		rf.becomeFollower(-1)
 		return
 	}
@@ -605,20 +607,24 @@ func (rf *Raft) processFailAppendReply(reply AppendEntryReply, prevLogIndex int,
 
 // SyncLogs Leader send local logs based on the nextIndex to followers
 func (rf *Raft) SyncLogs() {
-	mightBePartitioned := func() bool {
+	mightBePartitioned := func(reply AppendEntryReply) bool {
 		currentTerm := rf.CurrentTerm.Load()
+		if reply.Term != (currentTerm) {
+			return false
+		}
 		val, ok := rf.failedRPCCounter.Load(currentTerm)
 		if !ok {
 			rf.failedRPCCounter.Store(currentTerm, 1)
 			return false
 		}
 		fails := val.(int) + 1
-		if fails >= (len(rf.peers)+1)/2 {
+		if fails >= (len(rf.peers) + 1) {
 			return true
 		}
 		rf.failedRPCCounter.Store(currentTerm, fails)
 		return false
 	}
+
 	// Leader should start synchronize log here
 	for i := range rf.peers {
 		go func(server int) {
@@ -631,7 +637,7 @@ func (rf *Raft) SyncLogs() {
 			}
 			prevLogIndex, prevLogTerm, logEntries := rf.buildAppendEntry(nextIndex.(int))
 			ok = rf.sendAppendEntry(server, &AppendEntryArgs{
-				Term:         int(rf.CurrentTerm.Load()),
+				Term:         rf.CurrentTerm.Load(),
 				PrevLogIndex: prevLogIndex,
 				PrevLogTerm:  prevLogTerm,
 				LeaderCommit: rf.CommitIndex.Load(),
@@ -643,11 +649,12 @@ func (rf *Raft) SyncLogs() {
 			}, &reply)
 			if !ok {
 				debug.Debug(debug.DError, "S%d AppendEntry failed, to S%d \n", rf.me, server)
-				if mightBePartitioned() {
+				if mightBePartitioned(reply) {
 					rf.becomeFollower(-1)
 				}
 				return
 			}
+			clearSyncMap(&rf.failedRPCCounter)
 			// break if the Node is not leader
 			if !rf.isLeader() {
 				return
@@ -662,8 +669,8 @@ func (rf *Raft) SyncLogs() {
 	}
 }
 
-func (rf *Raft) flushLocalLog(log []Log) {
-	for i := int(rf.LastAppliedIndex.Load()) + 1; i <= int(rf.CommitIndex.Load()); i++ {
+func (rf *Raft) flushLocalLog(log []Log, commitIndex int) {
+	for i := int(rf.LastAppliedIndex.Load()) + 1; i <= commitIndex; i++ {
 		rf.applyChan <- ApplyMsg{
 			CommandValid: true,
 			Command:      log[i].Command,
@@ -674,14 +681,14 @@ func (rf *Raft) flushLocalLog(log []Log) {
 	}
 }
 
-func (rf *Raft) isLogMissing(prevLogIndex, prevLogTerm int, reply *AppendEntryReply) bool {
+func (rf *Raft) isLogMissing(prevLogIndex int, prevLogTerm int32, reply *AppendEntryReply) bool {
 	if prevLogIndex >= len(rf.LocalLog) {
 		reply.Term = prevLogTerm
 		reply.LastMatchIndex = len(rf.LocalLog) - 1
 		reply.Success = false
 		return true
 	}
-	if rf.LocalLog[prevLogIndex].Term == int32(prevLogTerm) {
+	if rf.LocalLog[prevLogIndex].Term == prevLogTerm {
 		return false
 	}
 	conflictTerm := rf.LocalLog[prevLogIndex].Term

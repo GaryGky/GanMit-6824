@@ -53,15 +53,16 @@ type RequestVoteReply struct {
 }
 
 type AppendEntryArgs struct {
-	Term                      int
-	PrevLogIndex, PrevLogTerm int
-	LeaderCommit              int32
-	Entries                   []Log
-	Base                      Base
+	Term         int32
+	PrevLogIndex int
+	PrevLogTerm  int32
+	LeaderCommit int32
+	Entries      []Log
+	Base         Base
 }
 
 type AppendEntryReply struct {
-	Term    int
+	Term    int32
 	Success bool
 	// when follower lost some logs, set this field to notify leader to reset next index
 	LastMatchIndex int
@@ -103,6 +104,10 @@ func (r *AppendEntryReply) PrintDebugInfo() {
 func rpcCall(endpoint *labrpc.ClientEnd, method string, args BaseMessage, reply BaseMessage) bool {
 	args.PrintDebugInfo()
 	ok := endpoint.Call(method, args, reply)
+	if !ok {
+		// don't print wrong information here
+		return false
+	}
 	reply.PrintDebugInfo()
 	return ok
 }
